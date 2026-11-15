@@ -136,9 +136,9 @@ export class Project {
   // --- Sauvegarde ---
   touch() { this.changed = true; clearTimeout(this.saveT); this.saveT = setTimeout(() => this.save(), 1500); }
   toJSON() {
-    const { id, name, w, h, surplus, fps, bg, effects, camEase, loop, onion, created } = this;
+    const { id, name, w, h, surplus, fps, bg, effects, camEase, loop, onion, created, link3d } = this;
     return {
-      id, name, w, h, surplus, fps, bg, effects, camEase, loop, onion, created, modified: Date.now(), thumb: this.thumb,
+      id, name, link3d, w, h, surplus, fps, bg, effects, camEase, loop, onion, created, modified: Date.now(), thumb: this.thumb,
       layers: this.layers,
       frames: this.frames.map(f => ({ id: f.id, hold: f.hold, cels: f.cels, cam: f.cam })),
     };

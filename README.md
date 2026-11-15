@@ -1,6 +1,6 @@
 # Celluloïd — studio d'animation de poche
 
-Application mobile d'animation (web-app installable, sans serveur). L'accueil propose **Animation 2D** ; l'**Animation 3D** est réservée pour plus tard.
+Application mobile d'animation (web-app installable, sans serveur). L'accueil propose **Animation 2D** et **Animation 3D**.
 
 ## Ce que fait la partie 2D
 
@@ -14,6 +14,15 @@ Application mobile d'animation (web-app installable, sans serveur). L'accueil pr
 - **Export** : vidéo MP4, GIF, image PNG, suite de PNG (ZIP), puis enregistrement dans la galerie via la feuille de partage du téléphone.
 
 Gestes : un doigt dessine ; deux doigts déplacent, zooment et tournent la page ; tape à deux doigts = annuler, à trois doigts = rétablir.
+
+## Ce que fait la partie 3D
+
+- **Import de modèles** : glb, gltf, vrm, fbx, pmx / pmd (MMD), obj (+mtl), dae, stl, ply, seuls, avec leurs textures, ou dans un zip (le format le plus riche du zip est choisi ; s'il est illisible, le suivant est essayé). Mouvements MMD `.vmd`.
+- **Pose et animation** : sélection d'un objet ou d'un os en le touchant, poignées déplacer / tourner / taille, une clé est posée automatiquement sur le frame courant, interpolation entre les clés, animations contenues dans le fichier.
+- **Caméra** : la vue dans le cadre est la caméra ; clés de caméra interpolées.
+- **Scène** : formes simples, fond, lumière, rendu « argile ».
+- **Export** : vidéo MP4 ou image PNG.
+- **Vers la 2D** : envoie l'animation 3D image par image sur un calque « Référence 3D » d'un projet 2D pour décalquer, ou une image comme décor fixe. Le projet 2D garde un lien pour revenir à la scène 3D.
 
 ## Lancer
 
@@ -37,4 +46,5 @@ Sur téléphone : publier le dépôt avec GitHub Pages (le workflow `.github/wor
 | `js/lineart.js` | extraction des traits |
 | `js/io.js` | import et export |
 | `js/editor.js`, `js/panels.js`, `js/ui.js` | interface |
-| `vendor/` | mp4-muxer et gifenc (licence MIT) |
+| `js/editor3d.js`, `js/import3d.js` | éditeur 3D, import des modèles |
+| `vendor/` | mp4-muxer, gifenc, three.js (licence MIT) |

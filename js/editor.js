@@ -52,12 +52,13 @@ function build() {
       ibtn('menu', 'Options du frame', () => panels.frameSheet(api)))));
 }
 
-async function exit() {
+async function exit() { await leave(); exitCb(); }
+// Enregistre et libère le projet sans changer d'écran.
+async function leave() {
   stop(); tools.commitXform(); closeAllSheets();
   const b = busy('Enregistrement…');
   try { await p.save(); } finally { b.close(); }
   p.close(); freeScratch(); S.project = null;
-  exitCb();
 }
 
 // ---------- Navigation entre frames ----------
@@ -262,7 +263,7 @@ function wire() {
 // Interface offerte aux panneaux (calques, effets, export…).
 const api = {
   get p() { return p; }, gotoFrame, pump, optbar, updateTop, buildTimeline, drawThumb, badge, setTool, fitView, render: requestRender,
-  addFrame, duplicateFrame, deleteFrame, moveFrame, setHold, clearCel, play, stop, hintSize,
+  leave, addFrame, duplicateFrame, deleteFrame, moveFrame, setHold, clearCel, play, stop, hintSize,
   // À appeler quand l'apparence de tous les frames change (calque masqué, opacité, effet de calque…).
   restyle() { p.staleAll(); if (S.ready) { p.refreshPreview(p.frames[S.frameIdx]); drawThumb(S.frameIdx); } p.touch(); requestRender(); if (!panels.fxOpen()) pump(); },
 };

@@ -296,6 +296,7 @@ export function menuSheet(api) {
       item('video', 'Importer une vidéo image par image', () => { s.close(); pickFiles('video/*', false, f => io.importVideo(f[0])); }),
       item('export', 'Exporter / enregistrer dans la galerie', () => { s.close(); exportSheet(api); }),
       item('fit', 'Recentrer la vue', () => { s.close(); api.fitView(); }),
+      p.link3d && item('cube', 'Retourner à la scène 3D liée', async () => { s.close(); await api.leave(); window.appNav.open3d(p.link3d); }),
       item('settings', 'Réglages du projet', () => { s.close(); projectSheet(api); }),
       item('edit', 'Aide : les gestes', () => { s.close(); helpSheet(); })),
   });
@@ -361,7 +362,7 @@ export function exportSheet(api) {
 export function lineartSheet(api, layer) {
   const p = api.p, frame = p.frames[S.frameIdx], cel = p.celOf(layer, frame);
   if (!cel?.canvas) { toast('Ce calque est vide sur ce frame. Importez d’abord une image de référence.'); return; }
-  const o = { mode: 'lines', sens: 60, thick: 6, dark: 35, clean: 12, keepColor: false, hide: true };
+  const o = { mode: 'lines', sens: 60, thick: 6, dark: 35, clean: 12, smooth: 60, weight: 0, keepColor: false, hide: true };
   const k = Math.min(1, 760 / Math.max(p.cw, p.ch)), sw = Math.round(p.cw * k), sh = Math.round(p.ch * k);
   const small = scratch('lasrc', sw, sh, { willReadFrequently: true });
   small._ctx.clearRect(0, 0, sw, sh); small._ctx.imageSmoothingQuality = 'high'; small._ctx.drawImage(cel.canvas, 0, 0, sw, sh);
@@ -370,7 +371,7 @@ export function lineartSheet(api, layer) {
   const cx = Math.round(p.mx * k), cy = Math.round(p.my * k), cw = Math.round(p.w * k), chh = Math.round(p.h * k);
   const view = h('canvas', { class: 'result', width: cw, height: chh }), vx = view.getContext('2d');
   let compare = false, timer = 0;
-  const params = () => ({ ...o, thick: Math.max(1, o.thick * k), clean: o.clean * k * k });
+  const params = () => ({ ...o, thick: Math.max(1, o.thick * k), clean: o.clean * k * k, smooth: o.smooth * Math.max(0.35, k) });
   const render = () => {
     const out = new ImageData(extractLines(src, params()), sw, sh), t = scratch('laout', sw, sh);
     t._ctx.putImageData(out, 0, 0);
@@ -391,6 +392,8 @@ export function lineartSheet(api, layer) {
       segmented([['lines', 'Traits'], ['dark', 'Traits + noirs'], ['edges', 'Contours couleur']], o.mode, v => { o.mode = v; drawExtra(); soon(); }),
       slider({ label: 'Sensibilité', min: 0, max: 100, step: 1, value: o.sens, oninput: v => { o.sens = v; soon(); } }),
       extra,
+      slider({ label: 'Lissage du trait', min: 0, max: 100, step: 5, value: o.smooth, oninput: v => { o.smooth = v; soon(); } }),
+      slider({ label: 'Épaisseur du trait', min: -50, max: 50, step: 1, value: o.weight, fmt: v => (v > 0 ? '+' : '') + v, oninput: v => { o.weight = v; soon(); } }),
       slider({ label: 'Nettoyage des poussières', min: 0, max: 200, step: 1, curve: 2, value: o.clean, fmt: v => v + ' px', oninput: v => { o.clean = v; soon(); } }),
       toggle('Garder la couleur d’origine des traits', o.keepColor, v => { o.keepColor = v; soon(); }),
       toggle('Comparer avec la référence', compare, v => { compare = v; soon(); }),

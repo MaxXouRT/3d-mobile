@@ -30,7 +30,7 @@ function morph(src, w, h, r, isMax) {
 /**
  * @param {{data:Uint8ClampedArray,width:number,height:number}} img
  * @param {object} o  mode: 'lines' | 'dark' | 'edges' ; sens 0..100 ; thick (px) ; dark 0..100 ;
- *                    clean (taille mini d'un îlot, px) ; keepColor ; color [r,g,b]
+ *                    clean (taille mini d'un îlot, px) ; smooth 0..100 ; weight -50..50 ; keepColor ; color [r,g,b]
  * @returns {Uint8ClampedArray} RGBA : traits sur fond transparent
  */
 export function extractLines(img, o) {
@@ -104,6 +104,27 @@ export function extractLines(img, o) {
         if (nx >= 0 && ny >= 0 && nx < w && ny < h && alpha[ny * w + nx] >= 48) { ok = true; break; }
       }
       if (!ok) alpha[i] = 0;
+    }
+  }
+
+  // Lissage « comme dessiné » : on floute légèrement le masque puis on le re-contraste autour d'un
+  // seuil. Les escaliers et le tremblé de pixels disparaissent, le bord reste net et anti-crénelé.
+  // `weight` déplace le seuil : positif = trait plus gras, négatif = plus fin.
+  const smooth = Math.round((o.smooth ?? 0) / 100 * 10);
+  if (smooth > 0) {
+    const tmp = new Uint8ClampedArray(n), cut = 84 - (o.weight ?? 0) * 0.8;
+    // Les traits fins ressortent faiblement et par à-coups : on les renforce avant de lisser
+    // pour qu'ils restent continus au lieu de se couper en pointillés.
+    for (let i = 0; i < n; i++) alpha[i] = alpha[i] * 1.7;
+    const pass = () => {
+      for (let y = 0; y < h; y++) { const r = y * w; for (let x = 0; x < w; x++) tmp[r + x] = (alpha[r + (x ? x - 1 : x)] + 2 * alpha[r + x] + alpha[r + (x < w - 1 ? x + 1 : x)] + 2) >> 2; }
+      for (let y = 0; y < h; y++) { const r = y * w, u = y ? r - w : r, d = y < h - 1 ? r + w : r; for (let x = 0; x < w; x++) alpha[r + x] = (tmp[u + x] + 2 * tmp[r + x] + tmp[d + x] + 2) >> 2; }
+    };
+    const rounds = smooth > 5 ? 2 : 1, per = Math.ceil(smooth / rounds);
+    for (let k = 0; k < rounds; k++) {
+      for (let i = 0; i < per; i++) pass();
+      const gain = 1.6 + per * 0.5;
+      for (let i = 0; i < n; i++) alpha[i] = (alpha[i] - cut) * gain + 127;
     }
   }
 

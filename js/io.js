@@ -6,7 +6,7 @@ import { compositeFrame, renderOutput, totalTicks, frameAtTick } from './render.
 
 const toBlob = (c, type, q) => new Promise(r => c.toBlob(r, type, q));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const safeName = s => (s || 'animation').replace(/[^\w\-àâäéèêëîïôöùûüç ]+/gi, '_').trim() || 'animation';
+export const safeName = s => (s || 'animation').replace(/[^\w\-àâäéèêëîïôöùûüç ]+/gi, '_').trim() || 'animation';
 
 // Place une image dans le cadre du format (centrée, entière), le surplus reste libre.
 function drawContain(ctx, p, img, iw, ih) {
@@ -123,37 +123,43 @@ async function pickCodec(w, h, fps, bitrate) {
   return null;
 }
 
-async function exportVideo(p, o, b) {
-  const even = x => Math.max(2, Math.round(x / 2) * 2), w = even(p.w * o.scale), hh = even(p.h * o.scale);
-  const bitrate = Math.round(Math.min(40e6, Math.max(1.5e6, w * hh * p.fps * 0.16)));
-  const pc = await pickCodec(w, hh, p.fps, bitrate);
+// Encode une vidéo. `run(push)` doit appeler `await push(canvas, i)` pour chaque image, dans l'ordre.
+// Utilisé par l'export 2D et par l'export 3D.
+export async function encodeVideo(w, hh, fps, run) {
+  const bitrate = Math.round(Math.min(40e6, Math.max(1.5e6, w * hh * fps * 0.16)));
+  const pc = await pickCodec(w, hh, fps, bitrate);
   if (pc) {
     const { Muxer, ArrayBufferTarget } = await import('../vendor/mp4-muxer.mjs');
-    const muxer = new Muxer({ target: new ArrayBufferTarget(), video: { codec: pc.kind, width: w, height: hh, frameRate: p.fps }, fastStart: 'in-memory' });
+    const muxer = new Muxer({ target: new ArrayBufferTarget(), video: { codec: pc.kind, width: w, height: hh, frameRate: fps }, fastStart: 'in-memory' });
     let err = null;
     const enc = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: e => { err = e; } });
     enc.configure(pc.cfg);
-    const us = 1e6 / p.fps;
-    await eachTick(p, o, async (cv, i) => {
+    const us = 1e6 / fps;
+    await run(async (cv, i) => {
       if (err) throw err;
       const vf = new VideoFrame(cv, { timestamp: Math.round(i * us), duration: Math.round(us) });
-      enc.encode(vf, { keyFrame: i % (p.fps * 2) === 0 }); vf.close();
+      enc.encode(vf, { keyFrame: i % (fps * 2) === 0 }); vf.close();
       while (enc.encodeQueueSize > 3) await sleep(8);
-    }, b);
+    });
     await enc.flush(); enc.close(); if (err) throw err;
     muxer.finalize();
     return { blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }), ext: 'mp4' };
   }
-  // Repli : enregistrement en temps réel du canvas.
+  // Repli : enregistrement en temps réel d'un canvas.
   if (typeof MediaRecorder === 'undefined') throw new Error('Ce navigateur ne sait pas encoder de vidéo. Essayez le GIF ou la séquence PNG.');
   const mime = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m));
-  const out = scratch('export', w, hh), stream = out.captureStream(0), track = stream.getVideoTracks()[0];
+  const rc = scratch('record', w, hh), stream = rc.captureStream(0), track = stream.getVideoTracks()[0];
   const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: bitrate }), chunks = [];
   rec.ondataavailable = e => e.data.size && chunks.push(e.data);
-  out._ctx.fillRect(0, 0, w, hh); rec.start();
-  await eachTick(p, o, async () => { track.requestFrame?.(); await sleep(1000 / p.fps); }, b);
+  rc._ctx.fillRect(0, 0, w, hh); rec.start();
+  await run(async cv => { rc._ctx.drawImage(cv, 0, 0, w, hh); track.requestFrame?.(); await sleep(1000 / fps); });
   await new Promise(r => { rec.onstop = r; rec.stop(); });
+  rc.width = rc.height = 1;
   return { blob: new Blob(chunks, { type: mime.split(';')[0] }), ext: mime.includes('mp4') ? 'mp4' : 'webm' };
+}
+function exportVideo(p, o, b) {
+  const even = x => Math.max(2, Math.round(x / 2) * 2);
+  return encodeVideo(even(p.w * o.scale), even(p.h * o.scale), p.fps, push => eachTick(p, o, push, b));
 }
 
 async function exportGif(p, o, b) {
