@@ -4,7 +4,7 @@ import { h, icon, ibtn, toast, sheet, slider, segmented, toggle, confirmDlg, pro
 import * as tools from './tools.js';
 import { FX, newEffect, scratch } from './effects.js';
 import { totalTicks, tickOfFrame } from './render.js';
-import { extractLines } from './lineart.js';
+import { extract } from './lineart.js';
 import * as io from './io.js';
 
 const pct = v => Math.round(v * 100) + '%';
@@ -362,34 +362,36 @@ export function exportSheet(api) {
 export function lineartSheet(api, layer) {
   const p = api.p, frame = p.frames[S.frameIdx], cel = p.celOf(layer, frame);
   if (!cel?.canvas) { toast('Ce calque est vide sur ce frame. Importez d’abord une image de référence.'); return; }
-  const o = { mode: 'lines', sens: 60, thick: 6, dark: 35, clean: 12, smooth: 60, weight: 0, keepColor: false, hide: true };
-  const k = Math.min(1, 760 / Math.max(p.cw, p.ch)), sw = Math.round(p.cw * k), sh = Math.round(p.ch * k);
+  const o = { mode: 'lines', sens: 60, thick: 6, dark: 35, clean: 12, smooth: 40, weight: 0, keepColor: false, hide: true, seps: true, sepSens: 65, sepHex: '#e5484d' };
+  const rgb = hx => [1, 3, 5].map(i => parseInt(hx.slice(i, i + 2), 16));
+  // Aperçu : uniquement le cadre du format, à une taille suffisante pour juger la finesse du trait.
+  const k = Math.min(1, 1100 / Math.max(p.w, p.h)), sw = Math.round(p.w * k), sh = Math.round(p.h * k);
   const small = scratch('lasrc', sw, sh, { willReadFrequently: true });
-  small._ctx.clearRect(0, 0, sw, sh); small._ctx.imageSmoothingQuality = 'high'; small._ctx.drawImage(cel.canvas, 0, 0, sw, sh);
+  small._ctx.clearRect(0, 0, sw, sh); small._ctx.imageSmoothingQuality = 'high'; small._ctx.drawImage(cel.canvas, p.mx, p.my, p.w, p.h, 0, 0, sw, sh);
   const src = small._ctx.getImageData(0, 0, sw, sh);
-  // on ne montre que le cadre du format
-  const cx = Math.round(p.mx * k), cy = Math.round(p.my * k), cw = Math.round(p.w * k), chh = Math.round(p.h * k);
-  const view = h('canvas', { class: 'result', width: cw, height: chh }), vx = view.getContext('2d');
+  const view = h('canvas', { class: 'result', width: sw, height: sh }), vx = view.getContext('2d');
   let compare = false, timer = 0;
-  const params = () => ({ ...o, thick: Math.max(1, o.thick * k), clean: o.clean * k * k, smooth: o.smooth * Math.max(0.35, k) });
+  const params = () => ({ ...o, thick: Math.max(1, o.thick * k), clean: o.clean * k * k, sepColor: rgb(o.sepHex), seps: o.seps && o.mode !== 'edges' });
   const render = () => {
-    const out = new ImageData(extractLines(src, params()), sw, sh), t = scratch('laout', sw, sh);
-    t._ctx.putImageData(out, 0, 0);
-    vx.globalAlpha = 1; vx.fillStyle = '#fff'; vx.fillRect(0, 0, cw, chh);
-    if (compare) { vx.globalAlpha = 0.45; vx.drawImage(small, -cx, -cy); vx.globalAlpha = 1; }
-    vx.drawImage(t, -cx, -cy);
+    const r = extract(src, params()), t = scratch('laout', sw, sh);
+    vx.globalAlpha = 1; vx.fillStyle = '#fff'; vx.fillRect(0, 0, sw, sh);
+    if (compare) { vx.globalAlpha = 0.45; vx.drawImage(small, 0, 0); vx.globalAlpha = 1; }
+    for (const px of [r.seps, r.lines]) if (px) { t._ctx.putImageData(new ImageData(px, sw, sh), 0, 0); vx.drawImage(t, 0, 0); }
   };
-  const soon = () => { clearTimeout(timer); timer = setTimeout(render, 40); };
-  const extra = h('div', {});
+  const soon = () => { clearTimeout(timer); timer = setTimeout(render, 60); };
+  const extra = h('div', { class: 'stack' });
   const drawExtra = () => extra.replaceChildren(...[
-    o.mode !== 'edges' && slider({ label: 'Épaisseur max. des traits', min: 1, max: 24, step: 1, value: o.thick, fmt: v => v + ' px', oninput: v => { o.thick = v; soon(); } }),
+    o.mode !== 'edges' && slider({ label: 'Épaisseur max. des traits à détecter', min: 1, max: 24, step: 1, value: o.thick, fmt: v => v + ' px', oninput: v => { o.thick = v; soon(); } }),
     o.mode === 'dark' && slider({ label: 'Aplats noirs', min: 0, max: 100, step: 1, value: o.dark, oninput: v => { o.dark = v; soon(); } }),
+    o.mode !== 'edges' && toggle('Tracer aussi les séparations de couleurs (ombres, reflets)', o.seps, v => { o.seps = v; drawExtra(); soon(); }),
+    o.mode !== 'edges' && o.seps && slider({ label: 'Finesse des couleurs distinguées', min: 0, max: 100, step: 1, value: o.sepSens, oninput: v => { o.sepSens = v; soon(); } }),
+    o.mode !== 'edges' && o.seps && h('div', { class: 'row' }, h('span', { class: 'lbl grow' }, 'Couleur des séparations'), h('input', { type: 'color', value: o.sepHex, oninput: e => { o.sepHex = e.target.value; soon(); } })),
   ].filter(Boolean));
   const many = !layer.fixed && p.frames.filter(f => f.cels[layer.id]).length > 1;
   const s = sheet({
     title: 'Extraire les traits', tall: true,
     content: [view,
-      segmented([['lines', 'Traits'], ['dark', 'Traits + noirs'], ['edges', 'Contours couleur']], o.mode, v => { o.mode = v; drawExtra(); soon(); }),
+      segmented([['lines', 'Traits'], ['dark', 'Traits + noirs'], ['edges', 'Couleurs seules']], o.mode, v => { o.mode = v; drawExtra(); soon(); }),
       slider({ label: 'Sensibilité', min: 0, max: 100, step: 1, value: o.sens, oninput: v => { o.sens = v; soon(); } }),
       extra,
       slider({ label: 'Lissage du trait', min: 0, max: 100, step: 5, value: o.smooth, oninput: v => { o.smooth = v; soon(); } }),
@@ -400,35 +402,39 @@ export function lineartSheet(api, layer) {
       toggle('Masquer la référence ensuite', o.hide, v => o.hide = v),
       h('button', { class: 'btn primary wide', onclick: () => apply(false) }, 'Créer le calque de traits'),
       many && h('button', { class: 'btn wide', onclick: () => apply(true) }, 'Appliquer à tous les frames du calque'),
-      h('p', { class: 'hint' }, '« Traits » ne garde que les lignes fines et sombres. « Traits + noirs » ajoute les zones pleines (cheveux noirs, ombres). « Contours couleur » trace les frontières entre couleurs quand l’image n’a pas de trait.')],
+      h('p', { class: 'hint' }, '« Traits » garde les lignes du dessin, même claires ou colorées. « Traits + noirs » ajoute les zones pleines (cheveux noirs). Les séparations de couleurs tracent, sur un calque à part, les limites d’ombres et de reflets qui n’ont pas de trait : le pot de peinture s’y arrête aussi. « Couleurs seules » ne trace que ces limites, pour une image sans trait.')],
   });
   drawExtra(); render();
 
   async function apply(all) {
     s.close();
     const b = busy('Extraction des traits…'); await nextPaint();
+    const opts = { ...o, sepColor: rgb(o.sepHex), seps: o.seps && o.mode !== 'edges' };
     try {
-      const nl = { ...p.makeLayer('Traits'), fixed: layer.fixed };
+      const nl = { ...p.makeLayer('Traits'), fixed: layer.fixed }, sl = opts.seps ? { ...p.makeLayer('Séparations'), fixed: layer.fixed } : null;
       const ref = scratch('ref', p.cw, p.ch, { willReadFrequently: true }), outc = scratch('imp', p.cw, p.ch);
       const list = layer.fixed ? [S.frameIdx] : all ? p.frames.map((f, i) => f.cels[layer.id] ? i : -1).filter(i => i >= 0) : [S.frameIdx];
+      const put = async (px, lay, f) => {
+        outc._ctx.putImageData(new ImageData(px, p.cw, p.ch), 0, 0);
+        const nc = await p.celFromBlob(await new Promise(r => outc.toBlob(r, 'image/png')), false);
+        if (lay.fixed) lay.cel = nc.id; else f.cels[lay.id] = nc.id;
+      };
       for (let n = 0; n < list.length; n++) {
         const fi = list[n], f = p.frames[fi];
         await p.loadFrame(fi);
         const c = p.celOf(layer, f); if (!c?.canvas) continue;
         ref._ctx.clearRect(0, 0, p.cw, p.ch); ref._ctx.drawImage(c.canvas, 0, 0);
-        const img = ref._ctx.getImageData(0, 0, p.cw, p.ch);
-        outc._ctx.putImageData(new ImageData(extractLines(img, o), p.cw, p.ch), 0, 0);
-        const nc = await p.celFromBlob(await new Promise(r => outc.toBlob(r, 'image/png')), false);
-        if (nl.fixed) nl.cel = nc.id; else f.cels[nl.id] = nc.id;
+        const r = extract(ref._ctx.getImageData(0, 0, p.cw, p.ch), opts);
+        await put(r.lines, nl, f); if (sl && r.seps) await put(r.seps, sl, f);
         f.stale = true;
         b.update(list.length > 1 ? `Frame ${n + 1} / ${list.length}` : null, (n + 1) / list.length); await nextPaint();
       }
       ref.width = ref.height = outc.width = outc.height = 1;
-      p.layers.splice(p.layers.indexOf(layer) + 1, 0, nl);
+      p.layers.splice(p.layers.indexOf(layer) + 1, 0, ...(sl ? [sl, nl] : [nl]));
       if (o.hide) layer.visible = false;
       S.layerId = nl.id;
     } finally { b.close(); }
     await api.gotoFrame(S.frameIdx); emit('layers'); api.restyle();
-    toast('Traits extraits sur le calque « Traits ». Ajoutez un calque dessous pour la couleur.', 4000);
+    toast(opts.seps ? 'Calques « Traits » et « Séparations » créés. Ajoutez un calque dessous pour la couleur.' : 'Traits extraits sur le calque « Traits ». Ajoutez un calque dessous pour la couleur.', 4500);
   }
 }

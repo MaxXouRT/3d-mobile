@@ -29,7 +29,7 @@ export async function importImages(files) {
     try { bmp = await createImageBitmap(files[0]); } catch { toast('Image illisible'); return; }
     const layer = addLayerAbove(p, 'Référence'), frame = p.frames[S.frameIdx], cel = p.celFor(layer, frame);
     drawContain(cel.canvas._ctx, p, bmp, bmp.width, bmp.height); bmp.close?.();
-    p.markDirty(cel, frame); cel.lossy = true; p.refreshPreview(frame);
+    p.markDirty(cel, frame); p.refreshPreview(frame); // enregistré sans perte : la pipette rend les couleurs exactes
     S.layerId = layer.id; emit('layers'); emit('edited');
     toast('Image importée sur un nouveau calque');
     return;
@@ -40,7 +40,7 @@ export async function importImages(files) {
     for (let i = 0; i < files.length; i++) {
       const bmp = await createImageBitmap(files[i]).catch(() => null); if (!bmp) continue;
       tmp._ctx.clearRect(0, 0, p.cw, p.ch); drawContain(tmp._ctx, p, bmp, bmp.width, bmp.height); bmp.close?.();
-      const cel = await p.celFromBlob(await toBlob(tmp, 'image/webp', 0.92), true), f = frameAt(p, S.frameIdx + i);
+      const cel = await p.celFromBlob(await toBlob(tmp, 'image/png'), false), f = frameAt(p, S.frameIdx + i);
       f.cels[layer.id] = cel.id; f.stale = true;
       b.update(`Image ${i + 1} / ${files.length}`, (i + 1) / files.length);
     }
@@ -80,7 +80,7 @@ export async function importVideo(file) {
       const t = Math.min(dur - 0.001, o.start + i / o.fps);
       await new Promise(res => { const done = () => { v.removeEventListener('seeked', done); res(); }; v.addEventListener('seeked', done); v.currentTime = t; setTimeout(done, 4000); });
       tmp._ctx.clearRect(0, 0, p.cw, p.ch); drawContain(tmp._ctx, p, v, v.videoWidth, v.videoHeight);
-      const cel = await p.celFromBlob(await toBlob(tmp, 'image/webp', 0.9), true), f = frameAt(p, S.frameIdx + i);
+      const cel = await p.celFromBlob(await toBlob(tmp, 'image/webp', 0.96), true), f = frameAt(p, S.frameIdx + i);
       f.cels[layer.id] = cel.id; f.stale = true;
       b.update(`Frame ${i + 1} / ${n}`, (i + 1) / n);
     }

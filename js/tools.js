@@ -274,15 +274,23 @@ function doFill(pt) {
 }
 
 // ---------- Pipette ----------
+// Prend la couleur réelle du dessin sous le doigt : celle du calque visible le plus haut à cet
+// endroit, sans tenir compte de son opacité ni des bords anti-crénelés (qui donneraient une
+// couleur délavée). Une référence réglée à 40 % d'opacité rend donc bien sa vraie couleur.
 function pick(pt) {
   const { p, frame } = cur(), c = scratch('pick', 1, 1, { willReadFrequently: true }), x = c._ctx;
-  x.globalAlpha = 1; x.fillStyle = p.bg; x.fillRect(0, 0, 1, 1);
-  for (const l of p.layers) {
-    const cv = l.visible && p.celOf(l, frame)?.canvas; if (!cv) continue;
-    x.globalAlpha = l.opacity; x.drawImage(cv, Math.floor(pt.x), Math.floor(pt.y), 1, 1, 0, 0, 1, 1);
+  const px = Math.floor(pt.x), py = Math.floor(pt.y);
+  let hex = p.bg, soft = null;
+  if (px >= 0 && py >= 0 && px < p.cw && py < p.ch) for (let i = p.layers.length - 1; i >= 0; i--) {
+    const l = p.layers[i], cv = l.visible && l.opacity > 0.02 && p.celOf(l, frame)?.canvas; if (!cv) continue;
+    x.globalCompositeOperation = 'copy'; x.globalAlpha = 1; x.drawImage(cv, px, py, 1, 1, 0, 0, 1, 1);
+    const d = x.getImageData(0, 0, 1, 1).data; if (d[3] < 24) continue;
+    const h6 = '#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join('');
+    if (d[3] >= 200) { hex = h6; soft = null; break; }
+    soft ??= h6;
   }
-  const d = x.getImageData(0, 0, 1, 1).data;
-  setColor('#' + [d[0], d[1], d[2]].map(v => v.toString(16).padStart(2, '0')).join(''), false);
+  S.pickAt = { x: pt.x, y: pt.y };
+  setColor(soft || hex, false);
 }
 export function setColor(c, remember = true) { S.color = c.toLowerCase(); if (remember) pushRecent(); emit('color'); }
 export function pushRecent() {
@@ -354,14 +362,14 @@ export function up(pt) {
   const s = st;
   if (s.kind === 'stroke') { endStroke(pt); pushRecentIfDrawn(s); }
   else if (s.kind === 'shape') { st = null; commitBuffer(s, s.t.opacity); pushUndo(s.p, s.cel, s.bbox); edited(s.p, s.cel, s.frame); }
-  else { st = null; if (s.kind === 'pick') { pushRecent(); emit('picked'); } else if (s.kind === 'fill') doFill(s.pt); }
+  else { st = null; if (s.kind === 'pick') { S.pickAt = null; pushRecent(); emit('picked'); } else if (s.kind === 'fill') doFill(s.pt); }
   emit('render');
 }
 function pushRecentIfDrawn(s) { if (!s.erase && S.recent[0] !== S.color) pushRecent(); }
 // Un deuxième doigt est arrivé : on abandonne le tracé en cours pour laisser place au zoom.
 export function cancel() {
   if (!st) return;
-  const s = st; st = null;
+  const s = st; st = null; S.pickAt = null;
   if (s.kind === 'stroke') {
     s.ctx.restore();
     if (s.erase) { const c = s.cel.canvas._ctx; c.save(); c.globalCompositeOperation = 'copy'; c.drawImage(scratch('backup', s.p.cw, s.p.ch), 0, 0); c.restore(); }

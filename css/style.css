@@ -194,3 +194,6 @@ video.result { background: #000; }
 .optbar .seg { flex: 1; }
 .item small { margin-left: auto; }
 .item.big small { margin-left: 0; }
+
+.stack { display: flex; flex-direction: column; gap: 12px; }
+.stack:empty { display: none; }

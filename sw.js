@@ -1,5 +1,5 @@
 // Hors-ligne : réseau d'abord (pour recevoir les mises à jour), cache en secours.
-const CACHE = 'celluloid-v2';
+const CACHE = 'celluloid-v3';
 const FILES = ['./', 'index.html', 'css/style.css', 'manifest.webmanifest', 'icons/icon.svg',
   'js/main.js', 'js/ui.js', 'js/store.js', 'js/state.js', 'js/project.js', 'js/render.js', 'js/effects.js', 'js/lineart.js',
   'js/tools.js', 'js/viewport.js', 'js/editor.js', 'js/panels.js', 'js/io.js', 'js/editor3d.js', 'js/import3d.js', 'vendor/three/three.module.min.js', 'vendor/three/three.core.min.js', 'vendor/mp4-muxer.mjs', 'vendor/gifenc.mjs'];
