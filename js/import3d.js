@@ -86,6 +86,7 @@ async function loadOne(model, entries) {
     l.setDRACOLoader(new DRACOLoader().setDecoderPath(new URL('../vendor/three/addons/libs/draco/', import.meta.url).href));
     l.setMeshoptDecoder(MeshoptDecoder);
     const g = await load(l); obj = g.scene; clips = g.animations || [];
+    tagHumanoid(g);
   } else if (x === 'fbx') {
     const [{ FBXLoader }, { TGALoader }] = await Promise.all([import('three/addons/loaders/FBXLoader.js'), import('three/addons/loaders/TGALoader.js')]);
     m.addHandler(/\.tga$/i, new TGALoader(m));
@@ -133,6 +134,14 @@ async function loadOne(model, entries) {
   });
   for (const b of bones) b.userData.rest = { p: b.position.clone(), q: b.quaternion.clone(), s: b.scale.clone() };
   return { root, bones, clips, mmd, mesh: mmd ? obj : null, format: x, name: model.name.split('/').pop().replace(/\.[^.]+$/, '') };
+}
+
+// VRM (0.x et 1.0) : le fichier déclare lui-même ses os humains (hips, leftUpperArm…). Sert à la capture de mouvement.
+function tagHumanoid(g) {
+  const ex = g.parser?.json?.extensions || {}, hb = ex.VRMC_vrm?.humanoid?.humanBones || ex.VRM?.humanoid?.humanBones;
+  if (!hb) return;
+  const byNode = new Map(Array.isArray(hb) ? hb.map(b => [b.node, b.bone]) : Object.entries(hb).map(([k, v]) => [v.node, k]));
+  g.scene.traverse(o => { const n = g.parser.associations.get(o)?.nodes; if (byNode.has(n)) o.userData.humanBone = byNode.get(n); });
 }
 
 // Mouvement MMD (.vmd) appliqué à un modèle pmx / pmd.

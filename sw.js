@@ -1,8 +1,9 @@
 // Hors-ligne : réseau d'abord (pour recevoir les mises à jour), cache en secours.
-const CACHE = 'celluloid-v3';
+const CACHE = 'celluloid-v4';
 const FILES = ['./', 'index.html', 'css/style.css', 'manifest.webmanifest', 'icons/icon.svg',
   'js/main.js', 'js/ui.js', 'js/store.js', 'js/state.js', 'js/project.js', 'js/render.js', 'js/effects.js', 'js/lineart.js',
-  'js/tools.js', 'js/viewport.js', 'js/editor.js', 'js/panels.js', 'js/io.js', 'js/editor3d.js', 'js/import3d.js', 'vendor/three/three.module.min.js', 'vendor/three/three.core.min.js', 'vendor/mp4-muxer.mjs', 'vendor/gifenc.mjs'];
+  'js/tools.js', 'js/viewport.js', 'js/editor.js', 'js/panels.js', 'js/io.js', 'js/editor3d.js', 'js/import3d.js', 'js/mocap.js', 'vendor/three/three.module.min.js', 'vendor/three/three.core.min.js', 'vendor/mp4-muxer.mjs', 'vendor/gifenc.mjs',
+  'models/mannequin.glb', 'models/mannequin.png', 'models/mannequin-femme.glb', 'models/mannequin-femme.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener('fetch', e => {

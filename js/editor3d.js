@@ -8,10 +8,14 @@ import * as db from './store.js';
 import { Project, uid } from './project.js';
 import { expandFiles, loadModel, loadVMD, candidates } from './import3d.js';
 import * as io from './io.js';
+import * as mocap from './mocap.js';
 
 const toBlob = (c, type, q) => new Promise(r => c.toBlob(r, type, q));
 const item = (ic, label, onclick, cls = '') => h('button', { class: 'item ' + cls, onclick, html: icon(ic) + `<span>${label}</span>` });
 const PRIMS = { box: 'Cube', sphere: 'Sphère', cylinder: 'Cylindre', cone: 'Cône', plane: 'Sol' };
+// Personnages livrés avec l'app (dossier models/) : squelette complet, prêts pour la pose et la capture de mouvement.
+const BUILTIN = [['mannequin', 'Mannequin'], ['mannequin-femme', 'Mannequin femme']];
+const boneName = (b, i) => b.userData.label || b.name || 'Os ' + i;
 
 export function new3dMeta(o) {
   return {
@@ -35,10 +39,10 @@ export async function openEditor3d(P, root, nav) {
   els.play = ibtn('play', 'Lire', () => playing ? stop() : play(), 'play');
   els.scrub = h('input', { type: 'range', min: 0, max: P.len - 1, step: 1, value: 0, 'aria-label': 'Frame', oninput: () => { if (playing) stop(); setFrame(+els.scrub.value); } });
   els.ticks = h('canvas', { class: 'ticks', height: 10 });
-  const TOOLS = [['object', 'cube', 'Objet'], ['pose', 'move', 'Pose'], ['add', 'plus', 'Ajouter'], ['cam', 'camera', 'Caméra'], ['to2d', 'brush', 'Vers la 2D']];
+  const TOOLS = [['object', 'cube', 'Objet'], ['pose', 'move', 'Pose'], ['mocap', 'person', 'Filmer'], ['add', 'plus', 'Ajouter'], ['cam', 'camera', 'Caméra'], ['to2d', 'brush', 'Vers la 2D']];
   els.tools = h('nav', { class: 'toolbar' }, TOOLS.map(([id, ic, label]) => h('button', {
     class: 'tool', 'data-tool': id, 'aria-label': label, html: icon(ic, 24) + `<span>${label}</span>`,
-    onclick: () => id === 'add' ? addSheet() : id === 'cam' ? camSheet() : id === 'to2d' ? to2dSheet() : setMode(id),
+    onclick: () => id === 'add' ? addSheet() : id === 'cam' ? camSheet() : id === 'to2d' ? to2dSheet() : id === 'mocap' ? mocapSheet() : setMode(id),
   })));
   root.replaceChildren(h('div', { class: 'editor e3d' },
     h('header', { class: 'topbar' }, ibtn('back', 'Retour aux projets', exit), els.undo, els.redo, els.chip,
@@ -142,6 +146,12 @@ export async function openEditor3d(P, root, nav) {
     } catch (e) { console.error(e); toast('Mouvement illisible'); }
     finally { b.close(); }
   }
+  async function addBuiltin(file, name) {
+    let blob;
+    try { const r = await fetch(new URL(`../models/${file}.glb`, import.meta.url)); if (!r.ok) throw new Error(r.status); blob = await r.blob(); }
+    catch (e) { console.error(e); toast('Mannequin indisponible : ouvrez l’app une fois avec Internet pour l’enregistrer sur l’appareil', 5000); return; }
+    await importFiles([new File([blob], name + '.glb', { type: 'model/gltf-binary' })]);
+  }
   function pickFiles(cb) {
     const inp = h('input', { type: 'file', multiple: true, style: { display: 'none' } });
     inp.addEventListener('change', () => { if (inp.files.length) cb([...inp.files]); inp.remove(); });
@@ -243,10 +253,10 @@ export async function openEditor3d(P, root, nav) {
   }
   function optbar() {
     const o = P.objects.find(x => x.id === sel.obj), r = o && rt.get(o.id), c = [];
-    if (!o) c.push(h('span', { class: 'opt-hint' }, P.objects.length ? 'Touchez un objet pour le sélectionner' : 'Scène vide : touchez « Ajouter » pour importer un modèle'));
+    if (!o) c.push(h('span', { class: 'opt-hint' }, P.objects.length ? 'Touchez un objet pour le sélectionner' : 'Scène vide : touchez « Ajouter » (modèle ou mannequin)'));
     else {
       const bone = sel.bone != null ? r.bones[sel.bone] : null;
-      c.push(h('button', { class: 'pill name', onclick: () => mode === 'pose' ? bonesSheet() : objectsSheet() }, bone ? (bone.name || 'Os ' + sel.bone) : mode === 'pose' ? 'Choisir un os…' : o.name));
+      c.push(h('button', { class: 'pill name', onclick: () => mode === 'pose' ? bonesSheet() : objectsSheet() }, bone ? boneName(bone, sel.bone) : mode === 'pose' ? 'Choisir un os…' : o.name));
       if (mode === 'object' || bone) c.push(segmented(bone ? [['rotate', 'Tourner'], ['translate', 'Déplacer']] : [['translate', 'Déplacer'], ['rotate', 'Tourner'], ['scale', 'Taille']], gizmo === 'scale' && bone ? 'rotate' : gizmo, v => { gizmo = v; reattach(); needRender = true; }));
       if (bone) c.push(ibtn('undo', 'Remettre cet os au repos', () => { pushUndo(); delete P.tracks[keyOf(sel)]; touch(); evaluate(); drawTicks(); }));
     }
@@ -360,6 +370,10 @@ export async function openEditor3d(P, root, nav) {
       content: [
         h('button', { class: 'btn primary wide', onclick: () => { s.close(); pickFiles(importFiles); }, html: icon('export', 20) + '<span>Importer un modèle 3D</span>' }),
         h('p', { class: 'hint' }, 'Formats : glb, gltf, vrm, fbx, pmx / pmd (MMD), obj, dae, stl, ply — ou un zip contenant le modèle et ses textures. Vous pouvez aussi sélectionner le modèle et ses textures ensemble. Un fichier .vmd ajoute un mouvement à un modèle MMD.'),
+        h('div', { class: 'lbl' }, 'Personnages prêts à l’emploi'),
+        h('div', { class: 'builtins' }, BUILTIN.map(([file, name]) => h('button', { class: 'builtin', onclick: () => { s.close(); addBuiltin(file, name); } },
+          h('img', { src: new URL(`../models/${file}.png`, import.meta.url).href, alt: '' }), h('span', {}, name)))),
+        h('p', { class: 'hint' }, 'Articulés de la tête aux doigts : posez-les os par os, ou animez-les avec « Filmer ».'),
         h('div', { class: 'lbl' }, 'Formes simples'),
         h('div', { class: 'grid4' }, Object.entries(PRIMS).map(([k, label]) => item(k === 'plane' ? 'fit' : 'cube', label, () => {
           s.close(); pushUndo();
@@ -382,6 +396,7 @@ export async function openEditor3d(P, root, nav) {
         h('div', { class: 'grid4' },
           item('edit', 'Renommer', async () => { const n = await promptDlg('Nom', o.name); if (n) { o.name = n; touch(); draw(); optbar(); } }),
           o.mmd ? item('video', 'Mouvement .vmd', () => { s.close(); pickFiles(f => importVMD(f[0])); }) : null,
+          r?.bones.length ? item('person', 'Copier un mouvement filmé', () => { s.close(); select(o.id, sel.obj === o.id ? sel.bone : null); mocapSheet(); }) : null,
           item('undo', 'Effacer ses clés', async () => { if (await confirmDlg(`Effacer toute l’animation de « ${o.name} » ?`, 'Effacer', true)) { pushUndo(); for (const k of Object.keys(P.tracks)) if (k === o.id || k.startsWith(o.id + '#')) delete P.tracks[k]; touch(); evaluate(); drawTicks(); } }),
           item('trash', 'Supprimer', async () => { if (await confirmDlg(`Supprimer « ${o.name} » ?`, 'Supprimer', true)) { pushUndo(); P.objects.splice(P.objects.indexOf(o), 1); scene.remove(r.root); select(null, null); touch(); draw(); } }, 'danger'))));
       return row;
@@ -394,8 +409,8 @@ export async function openEditor3d(P, root, nav) {
     const s = sheet({ title: 'Os du modèle', content: [q, list] });
     const draw = () => {
       const f = q.value.trim().toLowerCase();
-      list.replaceChildren(...r.bones.map((b, i) => [b, i]).filter(([b]) => !f || (b.name || '').toLowerCase().includes(f)).slice(0, 300).map(([b, i]) =>
-        h('button', { class: 'item' + (i === sel.bone ? ' on' : ''), onclick: () => { s.close(); select(sel.obj, i); } }, h('span', {}, b.name || 'Os ' + i), P.tracks[sel.obj + '#' + i] ? h('small', {}, '◆ animé') : null)));
+      list.replaceChildren(...r.bones.map((b, i) => [b, i]).filter(([b, i]) => !f || boneName(b, i).toLowerCase().includes(f)).slice(0, 300).map(([b, i]) =>
+        h('button', { class: 'item' + (i === sel.bone ? ' on' : ''), onclick: () => { s.close(); select(sel.obj, i); } }, h('span', {}, boneName(b, i)), P.tracks[sel.obj + '#' + i] ? h('small', {}, '◆ animé') : null)));
     };
     q.addEventListener('input', draw); draw();
   }
@@ -436,6 +451,7 @@ export async function openEditor3d(P, root, nav) {
     const s = sheet({
       title: P.name,
       content: h('div', { class: 'list' },
+        item('person', 'Copier un mouvement filmé', () => { s.close(); mocapSheet(); }),
         item('brush', 'Décalquer en 2D / envoyer un décor', () => { s.close(); to2dSheet(); }),
         item('export', 'Exporter la vidéo ou une image', () => { s.close(); exportSheet(); }),
         item('edit', 'Renommer le projet', async () => { s.close(); const n = await promptDlg('Nom du projet', P.name); if (n) { P.name = n; touch(); } }),
@@ -475,6 +491,111 @@ export async function openEditor3d(P, root, nav) {
           h('button', { class: 'btn wide', onclick: () => { io.download(r.blob, name); toast('Fichier enregistré dans les téléchargements'); }, html: icon('export', 20) + '<span>Télécharger le fichier</span>' })],
       });
     }
+  }
+
+  // ---------- Capture de mouvement : on se filme, le personnage reproduit le mouvement ----------
+  function mocapSheet() {
+    stop();
+    const chars = P.objects.filter(o => rt.get(o.id)?.bones.length);
+    if (!chars.length) { toast('Importez d’abord un personnage avec squelette (glb, vrm, fbx, pmx…) : touchez « Ajouter »', 4000); return; }
+    let o = chars.find(x => x.id === sel.obj) || chars[0];
+    const s = sheet({
+      title: 'Copier un mouvement filmé', tall: true,
+      content: [
+        h('p', { class: 'hint' }, `Filmez-vous : chaque mouvement de votre corps est reproduit par le personnage, à partir du frame ${frame + 1}. Tout est calculé sur l’appareil, la vidéo n’est envoyée nulle part.`),
+        chars.length > 1 ? h('div', { class: 'row' }, h('span', { class: 'lbl' }, 'Personnage'), h('select', { class: 'input', onchange: e => { o = chars.find(x => x.id === e.target.value); } }, chars.map(c => h('option', { value: c.id, selected: c === o }, c.name)))) : null,
+        h('button', { class: 'btn primary wide', onclick: () => pick(true), html: icon('camera', 20) + '<span>Me filmer</span>' }),
+        h('button', { class: 'btn wide', onclick: () => pick(false), html: icon('video', 20) + '<span>Choisir une vidéo</span>' }),
+        h('dl', { class: 'help' }, [['Cadre', 'tout le corps dans l’image, pieds compris'], ['Téléphone', 'posé, sans bouger'], ['Lumière', 'bonne, pas de contre-jour'], ['Tenue', 'qui se détache du fond']].map(([a, b]) => [h('dt', {}, a), h('dd', {}, b)])),
+        h('p', { class: 'hint' }, 'La première fois, le détecteur de mouvement (24 Mo) est téléchargé puis gardé sur l’appareil.')],
+    });
+    function pick(cam) {
+      const rig = mocap.findRig(rt.get(o.id).bones);
+      if (!rig.ok) { toast(`Squelette de « ${o.name} » non reconnu (manque : ${rig.missing.join(', ')})`, 5000); return; }
+      const inp = h('input', { type: 'file', accept: 'video/*', style: { display: 'none' } });
+      if (cam) inp.setAttribute('capture', 'user');
+      inp.addEventListener('change', () => { const f = inp.files[0]; inp.remove(); if (f) { s.close(); mocapOptions(o, f); } });
+      document.body.append(inp); inp.click();
+    }
+  }
+  async function mocapOptions(o, file) {
+    const v = h('video', { muted: true, playsInline: true, controls: true, preload: 'auto', class: 'result' });
+    v.src = URL.createObjectURL(file);
+    try { await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; setTimeout(rej, 15000); }); }
+    catch { toast('Vidéo illisible sur cet appareil'); URL.revokeObjectURL(v.src); return; }
+    const dur = await mocap.videoDuration(v), f0 = frame;
+    const opt = { start: 0, len: Math.min(dur, 30), smooth: 'mid', ground: true, mirror: false };
+    let started = false;
+    const info = h('p', { class: 'hint' });
+    const upd = () => {
+      const n = Math.max(1, Math.round(opt.len * P.fps));
+      info.textContent = `${n} frames (${opt.len.toFixed(1)} s à ${P.fps} i/s), du frame ${f0 + 1} au frame ${f0 + n}.` + (f0 + n > P.len ? ` La scène sera allongée à ${Math.min(3000, f0 + n)} frames.` : '');
+    };
+    const lenS = slider({ label: 'Durée', min: 0.1, max: Math.max(0.2, Math.min(dur, 60)), step: 0.1, value: opt.len, fmt: x => x.toFixed(1) + ' s', oninput: x => { opt.len = Math.max(0.1, Math.min(x, dur - opt.start)); upd(); } });
+    const s = sheet({
+      title: 'Copier le mouvement de « ' + o.name + ' »', tall: true, onClose: () => { if (!started) URL.revokeObjectURL(v.src); },
+      content: [v,
+        slider({ label: 'Début', min: 0, max: Math.max(0.1, dur), step: 0.1, value: 0, fmt: x => x.toFixed(1) + ' s', oninput: x => { opt.start = Math.min(x, Math.max(0, dur - 0.1)); if (opt.len > dur - opt.start) { opt.len = Math.max(0.1, dur - opt.start); lenS.set(opt.len); } v.currentTime = opt.start; upd(); } }),
+        lenS,
+        h('div', { class: 'row' }, h('span', { class: 'lbl' }, 'Lissage'), segmented([['low', 'Léger'], ['mid', 'Moyen'], ['high', 'Fort']], opt.smooth, x => { opt.smooth = x; })),
+        toggle('Pieds posés au sol', opt.ground, x => { opt.ground = x; }),
+        toggle('Effet miroir (gauche ↔ droite)', opt.mirror, x => { opt.mirror = x; }),
+        info,
+        h('button', { class: 'btn primary wide', onclick: () => { started = true; s.close(); runMocap(o, v, opt, f0); } }, 'Copier le mouvement')],
+    });
+    upd();
+  }
+  async function runMocap(o, v, opt, f0) {
+    v.pause(); v.play().then(() => v.pause()).catch(() => {}); // iOS : une vidéo jamais lue n'affiche pas l'image demandée
+    const r = rt.get(o.id), rig = mocap.findRig(r.bones);
+    let cancel = false, frames = null;
+    const cv = h('canvas', { class: 'mocap-view' }), txt = h('div', { class: 'busy-txt' }, 'Chargement du détecteur de mouvement…'), bar = h('div', { class: 'busy-bar' }, h('i', {}));
+    const el = h('div', { class: 'busy' }, h('div', { class: 'busy-box' }, cv, txt, bar,
+      h('button', { class: 'btn small', onclick: () => { cancel = true; txt.textContent = 'Arrêt…'; } }, 'Annuler')));
+    document.body.append(el);
+    const k = Math.min(1, 280 / Math.max(v.videoWidth || 1, v.videoHeight || 1));
+    cv.width = Math.round((v.videoWidth || 280) * k); cv.height = Math.round((v.videoHeight || 160) * k);
+    const x = cv.getContext('2d');
+    try {
+      frames = await mocap.track(v, {
+        start: opt.start, len: opt.len, fps: P.fps, cancelled: () => cancel,
+        onFrame: async (i, n, f) => {
+          x.drawImage(v, 0, 0, cv.width, cv.height); mocap.drawSkeleton(x, f, cv.width, cv.height);
+          txt.textContent = `Analyse du mouvement : image ${i + 1} / ${n}`;
+          bar.classList.add('on'); bar.firstChild.style.width = Math.round((i + 1) / n * 100) + '%';
+          if (i % 2 === 0) await nextPaint();
+        },
+      });
+    } catch (e) { console.error(e); toast('Analyse impossible : ' + (e.message || e), 6000); }
+    finally { el.remove(); URL.revokeObjectURL(v.src); }
+    if (!frames) return;
+    if (!frames.some(Boolean)) { toast('Personne n’a été vu dans la vidéo. Filmez tout le corps, bien éclairé.', 5000); return; }
+    const { pts, seen } = mocap.prepare(frames, { mirror: opt.mirror, sigma: { low: 0.03, mid: 0.06, high: 0.12 }[opt.smooth] * P.fps });
+    const limbs = mocap.limbsFrom(seen, rig);
+    if (!limbs.body) { toast('Le corps n’est pas assez visible dans la vidéo pour copier le mouvement.', 5000); return; }
+    const b = busy('Transfert du mouvement…'), keys = new Map(), n = pts.length;
+    try {
+      const solver = mocap.makeSolver(r, rig);
+      for (let i = 0; i < n; i++) {
+        for (const kf of solver.solve(pts[i], { ...limbs, ground: opt.ground })) {
+          const bi = r.bones.indexOf(kf.bone); if (bi < 0) continue;
+          let a = keys.get(bi); if (!a) keys.set(bi, a = []);
+          a.push({ f: f0 + i, p: kf.p, q: kf.q, s: kf.s });
+        }
+        if (i % 60 === 59) { b.update(null, (i + 1) / n); await nextPaint(); }
+      }
+    } catch (e) { console.error(e); toast('Transfert impossible : ' + (e.message || e), 6000); return; }
+    finally { b.close(); }
+    pushUndo(); setClip(o, -1); // le mouvement filmé remplace l'animation du fichier
+    for (const [bi, a] of keys) {
+      const key = o.id + '#' + bi, old = (P.tracks[key] || []).filter(kf => kf.f < f0 || kf.f >= f0 + n);
+      P.tracks[key] = [...old, ...a].sort((p, q) => p.f - q.f);
+    }
+    if (f0 + n > P.len) { P.len = Math.min(3000, f0 + n); syncLen(); }
+    touch(); select(o.id, null); evaluate(); drawTicks(); updateTop();
+    const off = [rig.legs && !limbs.legs.l && !limbs.legs.r && 'jambes', !limbs.head && 'tête'].filter(Boolean);
+    toast(`Mouvement copié sur « ${o.name} » : ${n} frames, ${keys.size} os.` + (off.length ? ` Hors champ, non suivis : ${off.join(', ')}.` : ''), 5000);
+    setFrame(f0); play();
   }
 
   // ---------- Vers la 2D ----------
@@ -555,7 +676,7 @@ export async function openEditor3d(P, root, nav) {
       }
     } finally { b.close(); }
     applyScene(); evaluate(); drawTicks();
-  } else setTimeout(() => alive && toast('Touchez « Ajouter » pour importer un modèle 3D', 3500), 400);
+  } else setTimeout(() => alive && toast('Touchez « Ajouter » pour importer un modèle 3D ou prendre un mannequin', 3500), 400);
   window.addEventListener('pagehide', () => alive && save());
   return { importFiles, state: () => ({ frame, sel, mode, objects: P.objects, tracks: P.tracks, rt }) };
 }
