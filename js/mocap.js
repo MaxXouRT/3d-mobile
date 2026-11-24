@@ -4,10 +4,13 @@
 // 2. Squelette : les os humains du modèle sont reconnus (VRM, Mixamo, MMD, VRoid, Blender, Unreal, 3ds Max…).
 // 3. Transfert : chaque os de membre prend la direction du membre filmé en partant de sa pose de repos ;
 //    bassin, torse et tête prennent l'orientation filmée. Les pieds restent posés au sol.
+// 4. Doigts : MediaPipe Hands (21 points par main) sur un recadrage agrandi autour de chaque poignet.
+// 5. Caméra tenue à la main : seule l'orientation d'ensemble du corps dépend de la caméra ; elle est lissée,
+//    la position des membres les uns par rapport aux autres est gardée telle quelle.
 import * as THREE from 'three';
 
 const DIR = new URL('../vendor/mediapipe/', import.meta.url).href;
-let detector = null, clock = 0;
+let detector = null, handDet = null, clock = 0;
 
 export async function loadDetector() {
   if (detector) return detector;
@@ -18,6 +21,43 @@ export async function loadDetector() {
   });
   try { detector = await make('GPU'); } catch (e) { console.warn('Détection sur le GPU impossible, passage au processeur', e); detector = await make('CPU'); }
   return detector;
+}
+
+export async function loadHands() {
+  if (handDet) return handDet;
+  const { FilesetResolver, HandLandmarker } = await import('../vendor/mediapipe/vision_bundle.mjs');
+  const files = await FilesetResolver.forVisionTasks(DIR + 'wasm');
+  const make = delegate => HandLandmarker.createFromOptions(files, {
+    baseOptions: { modelAssetPath: DIR + 'hand_landmarker.task', delegate }, runningMode: 'IMAGE', numHands: 2,
+    minHandDetectionConfidence: 0.3, minHandPresenceConfidence: 0.3,
+  });
+  try { handDet = await make('GPU'); } catch (e) { console.warn('Mains : GPU impossible, passage au processeur', e); handDet = await make('CPU'); }
+  return handDet;
+}
+
+// Les mains sont petites dans une vidéo en pied : on recadre autour du poignet (repéré par le corps), on agrandit
+// ce morceau, puis on y cherche la main dont le poignet tombe au bon endroit. o : 0 main gauche, 1 main droite.
+const HC = 224; let hcv = null;
+function trackHand(det, video, l, o) {
+  if ((l[15 + o].visibility ?? 1) < 0.3) return null;
+  const W = video.videoWidth, H = video.videoHeight, P = i => [l[i].x * W, l[i].y * H];
+  const w = P(15 + o), e = P(13 + o), k1 = P(17 + o), k2 = P(19 + o);
+  const torso = Math.hypot((l[11].x + l[12].x - l[23].x - l[24].x) * W / 2, (l[11].y + l[12].y - l[23].y - l[24].y) * H / 2);
+  let ux = (k1[0] + k2[0]) / 2 - w[0], uy = (k1[1] + k2[1]) / 2 - w[1], un = Math.hypot(ux, uy);
+  if (un < 1) { ux = w[0] - e[0]; uy = w[1] - e[1]; un = Math.hypot(ux, uy) || 1; }
+  const sz = Math.max(1.4 * Math.hypot(w[0] - e[0], w[1] - e[1]), 0.75 * torso, 48);
+  const x0 = w[0] + ux / un * sz * 0.3 - sz / 2, y0 = w[1] + uy / un * sz * 0.3 - sz / 2;
+  const sx = Math.max(0, x0), sy = Math.max(0, y0), ex = Math.min(W, x0 + sz), ey = Math.min(H, y0 + sz);
+  if (ex - sx < 4 || ey - sy < 4) return null;
+  if (!hcv) { hcv = document.createElement('canvas'); hcv.width = hcv.height = HC; }
+  const c = hcv.getContext('2d'), k = HC / sz;
+  c.fillStyle = '#000'; c.fillRect(0, 0, HC, HC);
+  c.drawImage(video, sx, sy, ex - sx, ey - sy, (sx - x0) * k, (sy - y0) * k, (ex - sx) * k, (ey - sy) * k);
+  const r = det.detect(hcv), wx = (w[0] - x0) / sz, wy = (w[1] - y0) / sz;
+  let best = -1, bd = 0.3;
+  (r.landmarks || []).forEach((hl, i) => { const d = Math.hypot(hl[0].x - wx, hl[0].y - wy); if (d < bd) { bd = d; best = i; } });
+  if (best < 0) return null;
+  return { w: r.worldLandmarks[best].map(p => [p.x, p.y, p.z]), l: r.landmarks[best].map(p => [(x0 + p.x * sz) / W, (y0 + p.y * sz) / H]) };
 }
 
 // Durée d'une vidéo (certaines vidéos enregistrées par le navigateur annoncent une durée infinie).
@@ -35,21 +75,28 @@ function seek(v, t) {
   });
 }
 
-// Suit le corps image par image. Par image : points 3D (w), visibilité (v), position dans l'image (l), ou null.
-export async function track(video, { start = 0, len, fps, onFrame, cancelled }) {
-  const det = await loadDetector(), n = Math.max(1, Math.round(len * fps)), out = [], end = video.duration - 0.001;
+// Suit le corps image par image. Par image : points 3D (w), visibilité (v), position dans l'image (l),
+// mains [gauche, droite] (h : points 3D et position dans l'image, ou null), ou null si personne n'est vu.
+export async function track(video, { start = 0, len, fps, hands = false, onFrame, cancelled }) {
+  const det = await loadDetector(), hd = hands ? await loadHands() : null;
+  const n = Math.max(1, Math.round(len * fps)), out = [], end = video.duration - 0.001;
   for (let i = 0; i < n; i++) {
     if (cancelled?.()) return null;
-    await seek(video, Math.min(end, start + i / fps));
+    const t = Math.min(end, start + i / fps);
+    await seek(video, t);
+    // Vidéo qu'on ne peut pas parcourir : on lirait toujours la même image, et le résultat serait faux.
+    if (Math.abs(video.currentTime - t) > Math.max(0.25, 2 / fps)) throw new Error('cette vidéo ne se laisse pas parcourir image par image sur cet appareil. Choisissez-la depuis la galerie ou réenregistrez-la.');
     clock += Math.ceil(1000 / fps); // le mode vidéo exige des horodatages croissants
     const r = det.detectForVideo(video, clock), w = r.worldLandmarks?.[0], l = r.landmarks?.[0];
-    out.push(w && l ? { w: w.map(p => [p.x, p.y, p.z]), v: l.map(p => p.visibility ?? 1), l: l.map(p => [p.x, p.y]), a: video.videoWidth / video.videoHeight || 1 } : null);
+    out.push(w && l ? { w: w.map(p => [p.x, p.y, p.z]), v: l.map(p => p.visibility ?? 1), l: l.map(p => [p.x, p.y]), a: video.videoWidth / video.videoHeight || 1,
+      h: hd ? [trackHand(hd, video, l, 0), trackHand(hd, video, l, 1)] : null } : null);
     await onFrame?.(i, n, out[i]);
   }
   return out;
 }
 
 // Traits du squelette filmé, pour l'aperçu pendant l'analyse.
+const FINGER_LINES = [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12], [0, 13, 14, 15, 16], [0, 17, 18, 19, 20], [5, 9, 13, 17]];
 const BONES2D = [[11, 12], [11, 13], [13, 15], [12, 14], [14, 16], [11, 23], [12, 24], [23, 24], [23, 25], [25, 27], [27, 31], [24, 26], [26, 28], [28, 32], [7, 0], [0, 8]];
 export function drawSkeleton(x, f, w, h) {
   if (!f) return;
@@ -58,6 +105,10 @@ export function drawSkeleton(x, f, w, h) {
     if (f.v[a] < 0.3 || f.v[b] < 0.3) continue;
     x.strokeStyle = a > 10 && a % 2 === b % 2 ? (a % 2 ? '#ff8a3d' : '#5cc8ff') : '#fff'; // gauche orange, droite bleu
     x.beginPath(); x.moveTo(f.l[a][0] * w, f.l[a][1] * h); x.lineTo(f.l[b][0] * w, f.l[b][1] * h); x.stroke();
+  }
+  x.lineWidth = Math.max(1, w / 260); x.strokeStyle = '#ffd23d';
+  for (const hd of f.h || []) if (hd) for (const ch of FINGER_LINES) {
+    x.beginPath(); ch.forEach((i, k) => x[k ? 'lineTo' : 'moveTo'](hd.l[i][0] * w, hd.l[i][1] * h)); x.stroke();
   }
 }
 
@@ -84,7 +135,9 @@ function refine(f) {
 
 // MediaPipe : x vers la droite de l'image, y vers le bas, z vers le fond. three.js : y vers le haut, z vers la caméra.
 // `seen[j]` : part des images où le point j est bien visible (sert à ignorer un membre hors champ).
-export function prepare(frames, { mirror = false, sigma = 1.5 } = {}) {
+// `stab` (en images) : lissage de l'orientation d'ensemble du corps, qui seule tremble quand la caméra bouge.
+// Renvoie aussi les mains (21 points par image, ou null si jamais vues) et la part des images où chacune est vue.
+export function prepare(frames, { mirror = false, sigma = 1.5, stab = 0 } = {}) {
   const n = frames.length, pts = Array.from({ length: n }, () => new Float32Array(99)), seen = new Float32Array(33);
   const W = frames.map(f => f && (f.l ? refine(f) : f.w));
   for (let j = 0; j < 33; j++) {
@@ -102,20 +155,61 @@ export function prepare(frames, { mirror = false, sigma = 1.5 } = {}) {
     k = -1;
     for (let i = n - 1; i >= 0; i--) if (ok[i] === 1) k = i; else if (!ok[i] && k >= 0) pts[i].set(pts[k].subarray(j * 3, j * 3 + 3), j * 3);
   }
-  if (sigma > 0.2 && n > 2) {
-    const r = Math.ceil(sigma * 2.5), wt = Array.from({ length: 2 * r + 1 }, (_, d) => Math.exp(-((d - r) ** 2) / (2 * sigma * sigma)));
-    const src = pts.map(p => p.slice());
+  // Mains : une image sans main reprend la plus proche où elle a été vue.
+  const hands = {}, handSeen = {};
+  for (const [side, o] of [['l', 0], ['r', 1]]) {
+    const so = mirror ? 1 - o : o, src = frames.map(f => f?.h?.[so]?.w || null), got = src.filter(Boolean).length;
+    handSeen[side] = got / n; hands[side] = null;
+    if (!got) continue;
+    const first = src.findIndex(Boolean), arr = Array.from({ length: n }, () => new Float32Array(63));
+    let last = src[first];
     for (let i = 0; i < n; i++) {
-      const acc = new Float32Array(99); let sw = 0;
-      for (let d = -r; d <= r; d++) {
-        const q = i + d; if (q < 0 || q >= n) continue;
-        const w = wt[d + r], s = src[q]; sw += w;
-        for (let c = 0; c < 99; c++) acc[c] += s[c] * w;
-      }
-      for (let c = 0; c < 99; c++) pts[i][c] = acc[c] / sw;
+      if (src[i]) last = src[i];
+      for (let j = 0; j < 21; j++) { const [x, y, z] = last[j]; arr[i][j * 3] = mirror ? -x : x; arr[i][j * 3 + 1] = -y; arr[i][j * 3 + 2] = -z; }
     }
+    hands[side] = arr;
   }
-  return { pts, seen };
+  if (stab > 0.2 && n > 2) stabilize(pts, hands, stab);
+  smooth(pts, 99, sigma);
+  for (const s of ['l', 'r']) if (hands[s]) smooth(hands[s], 63, sigma);
+  return { pts, seen, hands, handSeen };
+}
+
+// Lissage gaussien dans le temps de chaque coordonnée.
+function smooth(arr, m, sigma) {
+  const n = arr.length; if (!(sigma > 0.2) || n < 3) return;
+  const r = Math.ceil(sigma * 2.5), wt = Array.from({ length: 2 * r + 1 }, (_, d) => Math.exp(-((d - r) ** 2) / (2 * sigma * sigma)));
+  const src = arr.map(p => p.slice());
+  for (let i = 0; i < n; i++) {
+    const acc = new Float32Array(m); let sw = 0;
+    for (let d = -r; d <= r; d++) {
+      const q = i + d; if (q < 0 || q >= n) continue;
+      const w = wt[d + r], s = src[q]; sw += w;
+      for (let c = 0; c < m; c++) acc[c] += s[c] * w;
+    }
+    for (let c = 0; c < m; c++) arr[i][c] = acc[c] / sw;
+  }
+}
+
+// Caméra qui bouge : quand elle tourne, tout le corps semble tourner d'un bloc, mais les membres ne bougent pas
+// les uns par rapport aux autres. On lisse donc seulement l'orientation d'ensemble (bassin + épaules) dans le temps
+// et on fait tourner chaque image de l'écart : les secousses disparaissent, les gestes restent.
+function stabilize(pts, hands, sigma) {
+  const n = pts.length, V = i => j => new THREE.Vector3(pts[i][j * 3], pts[i][j * 3 + 1], pts[i][j * 3 + 2]);
+  const Q = pts.map((_, i) => { const p = V(i); return basis(p(23).sub(p(24)), mid(p(11), p(12)).sub(mid(p(23), p(24)))); });
+  for (let i = 1; i < n; i++) if (Q[i].dot(Q[i - 1]) < 0) Q[i].set(-Q[i].x, -Q[i].y, -Q[i].z, -Q[i].w);
+  const r = Math.ceil(sigma * 2.5), c = new THREE.Quaternion(), v = new THREE.Vector3();
+  for (let i = 0; i < n; i++) {
+    let x = 0, y = 0, z = 0, w = 0;
+    for (let d = -r; d <= r; d++) {
+      const q = Q[i + d]; if (!q) continue;
+      const k = Math.exp(-(d * d) / (2 * sigma * sigma)) * Math.sign(q.dot(Q[i]) || 1);
+      x += q.x * k; y += q.y * k; z += q.z * k; w += q.w * k;
+    }
+    c.set(x, y, z, w).normalize().multiply(Q[i].clone().invert());
+    for (let j = 0; j < 33; j++) v.fromArray(pts[i], j * 3).applyQuaternion(c).toArray(pts[i], j * 3);
+    for (const s of ['l', 'r']) if (hands[s]) for (let j = 0; j < 21; j++) v.fromArray(hands[s][i], j * 3).applyQuaternion(c).toArray(hands[s][i], j * 3);
+  }
 }
 
 // ---------- Reconnaissance des os humains ----------
@@ -155,6 +249,30 @@ export function roleOf(bone) {
 }
 
 const depthOf = b => { let d = 0; for (let o = b.parent; o; o = o.parent) d++; return d; };
+
+// Doigts : 3 os par doigt (le pouce part de la paume), du plus proche de la main au bout.
+export const FINGERS = ['thumb', 'index', 'middle', 'ring', 'little'];
+const FINGER_RE = { thumb: /(thumb|親指|pollex)/, index: /(index|人指|人差|forefinger|pointer)/, middle: /(middle|中指)/, ring: /(ring|薬指)/, little: /(pinky|pinkie|little|小指)/ };
+const VRM_FINGER = /^(?:left|right)(Thumb|Index|Middle|Ring|Little)(?:Metacarpal|Proximal|Intermediate|Distal)$/;
+const TIP = /(先|tip|end|nub)\d*$/;
+function fingersOf(hand, bones) {
+  const out = {}; if (!hand) return out;
+  const under = bones.filter(b => isAncestor(hand, b));
+  const byTag = {}, byName = {}, tips = {};
+  for (const b of under) {
+    const m = VRM_FINGER.exec(b.userData.humanBone || ''); if (m) (byTag[m[1].toLowerCase()] ||= []).push(b);
+    const n = (b.name || '').normalize('NFKC').toLowerCase(), f = FINGERS.find(k => FINGER_RE[k].test(n));
+    if (f) (TIP.test(n) ? (tips[f] ||= []) : (byName[f] ||= [])).push(b);
+  }
+  const src = Object.keys(byTag).length ? byTag : byName;
+  for (const f of FINGERS) {
+    const chain = (src[f] || []).sort((a, b) => depthOf(a) - depthOf(b)); if (!chain.length) continue;
+    const bones3 = chain.slice(0, 3), last = bones3.at(-1);
+    const tip = chain[3] || (tips[f] || []).sort((a, b) => depthOf(a) - depthOf(b))[0] || last.children.find(c => c.isBone) || null;
+    out[f] = { bones: bones3, tip };
+  }
+  return out;
+}
 const isAncestor = (a, b) => { for (let o = b?.parent; o; o = o.parent) if (o === a) return true; return false; };
 
 export function findRig(bones) {
@@ -187,6 +305,7 @@ export function findRig(bones) {
   rig.missing = [!(rig.hips || spine.length) && 'bassin', !(rig.l.upperArm && rig.l.lowerArm) && 'bras gauche', !(rig.r.upperArm && rig.r.lowerArm) && 'bras droit'].filter(Boolean);
   rig.ok = !rig.missing.length;
   rig.legs = !!(rig.l.upperLeg && rig.l.lowerLeg && rig.r.upperLeg && rig.r.lowerLeg);
+  rig.fingers = { l: fingersOf(rig.l.hand, bones), r: fingersOf(rig.r.hand, bones) };
   return rig;
 }
 
@@ -200,6 +319,13 @@ function basis(x, up, out = new THREE.Quaternion()) {
   return out.setFromRotationMatrix(_mb.makeBasis(_x, _y, _z));
 }
 const mid = (a, b) => a.clone().add(b).multiplyScalar(0.5);
+// Repère d'une main : vers les doigts, vers l'index, normale de la paume.
+function handBasis(w, idx, pinky, out = new THREE.Quaternion()) {
+  _x.copy(idx).add(pinky).multiplyScalar(0.5).sub(w).normalize();
+  _y.copy(idx).sub(pinky); _y.addScaledVector(_x, -_y.dot(_x)).normalize(); _z.crossVectors(_x, _y);
+  return out.setFromRotationMatrix(_mb.makeBasis(_x, _y, _z));
+}
+const FSEG = { thumb: [1, 2, 3, 4], index: [5, 6, 7, 8], middle: [9, 10, 11, 12], ring: [13, 14, 15, 16], little: [17, 18, 19, 20] };
 
 // Prépare le transfert vers un modèle (r : { root, bones }) et renvoie solve(points d'une image).
 export function makeSolver(r, rig) {
@@ -236,9 +362,35 @@ export function makeSolver(r, rig) {
     rest[s] = { upperArm: dir(g.upperArm, g.lowerArm), lowerArm: dir(g.lowerArm, g.hand), hand: g.hand && tipOf(g.hand),
       upperLeg: dir(g.upperLeg, g.lowerLeg), lowerLeg: dir(g.lowerLeg, g.foot), foot: g.foot && (g.toes ? dir(g.foot, g.toes) : tipOf(g.foot)) };
   }
+  // Doigts : directions au repos, et repère de la main (poignet, base de l'index, base de l'auriculaire).
+  const fwd0 = new THREE.Vector3(0, 0, 1).applyQuaternion(qHips0);
+  const fing = { l: {}, r: {} }, hand0 = {};
+  for (const s of ['l', 'r']) {
+    let F = rig.fingers?.[s] || {};
+    const hb = rig[s].hand;
+    if (hb && !Object.keys(F).length) { // noms inconnus : les chaînes qui partent de la main, la plus en avant étant le pouce
+      const chains = hb.children.filter(c => c.isBone).map(c => { const ch = [c]; while (ch.length < 4 && ch.at(-1).children.some(x => x.isBone)) ch.push(ch.at(-1).children.find(x => x.isBone)); return ch; }).filter(ch => ch.length >= 2);
+      if (chains.length === 5) {
+        chains.sort((a, b) => posOf(b.at(-1)).sub(posOf(hb)).dot(fwd0) - posOf(a.at(-1)).sub(posOf(hb)).dot(fwd0));
+        F = Object.fromEntries(FINGERS.map((f, i) => [f, { bones: chains[i].slice(0, 3), tip: chains[i][3] || null }]));
+        rig.fingers[s] = F;
+      }
+    }
+    for (const f of FINGERS) {
+      const c = F[f]; if (!c?.bones.length) continue;
+      const pos = c.bones.map(b => posOf(b)), tip = c.tip && posOf(c.tip), dirs = [];
+      for (let k = 0; k < pos.length; k++) {
+        const nx = pos[k + 1] || tip;
+        dirs.push(nx ? nx.clone().sub(pos[k]).normalize() : k ? dirs[k - 1].clone() : pos[0].clone().sub(posOf(hb)).normalize());
+      }
+      for (const b of c.bones) { rq.set(b, quatOf(b)); depth.set(b, depthOf(b)); used.push(b); }
+      fing[s][f] = { bones: c.bones, dirs };
+    }
+    if (hb && fing[s].index && fing[s].little) hand0[s] = handBasis(posOf(hb), posOf(fing[s].index.bones[0]), posOf(fing[s].little.bones[0])).invert();
+  }
   const feet = [L.foot, R.foot, L.toes, R.toes].filter(Boolean);
   const ground0 = feet.length ? Math.min(...feet.map(b => P.get(b).y)) : 0;
-  const keyed = [...new Set(used)].sort((a, b) => depth.get(a) - depth.get(b));
+  const keyed = () => [...new Set(used)].sort((a, b) => depth.get(a) - depth.get(b));
 
   const V = Array.from({ length: 33 }, () => new THREE.Vector3());
   const pt = (pts, i) => V[i].set(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]).applyQuaternion(yaw);
@@ -249,9 +401,30 @@ export function makeSolver(r, rig) {
     return out.setFromUnitVectors(from, target.normalize()).multiply(parentD);
   };
   const pitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -HEAD_PITCH);
+  const HV = Array.from({ length: 21 }, () => new THREE.Vector3()), order = keyed();
 
-  // opts : { arms: {l, r}, legs: {l, r}, head, ground } — membres à suivre et pieds au sol.
-  function solve(pts, opts) {
+  // Main filmée : orientation complète de la main (une part de sa torsion passe dans l'avant-bras pour ne pas
+  // tordre le poignet), puis chaque phalange prend la direction filmée.
+  function solveHand(s, H, poseDir, b, D) {
+    if (!hand0[s]) return null;
+    for (let j = 0; j < 21; j++) HV[j].set(H[j * 3], H[j * 3 + 1], H[j * 3 + 2]).applyQuaternion(yaw);
+    const fwdH = mid(HV[5], HV[17]).sub(HV[0]);
+    if (poseDir.lengthSq() > 1e-10 && fwdH.angleTo(poseDir) > 1.8) return null; // main incohérente avec le bras : ignorée
+    const full = handBasis(HV[0], HV[5], HV[17]).multiply(hand0[s]);
+    const axis = rest[s].lowerArm.clone().applyQuaternion(b).normalize(), rel = full.clone().multiply(b.clone().invert());
+    const k = axis.dot(_p.set(rel.x, rel.y, rel.z)), tw = new THREE.Quaternion(axis.x * k, axis.y * k, axis.z * k, rel.w).normalize();
+    b.premultiply(new THREE.Quaternion().slerp(tw, 0.5));
+    for (const f of FINGERS) {
+      const F = fing[s][f]; if (!F) continue;
+      const seq = FSEG[f], m = F.bones.length; let parent = full;
+      F.bones.forEach((bone, k2) => { const i = 3 - m + k2, d = swing(parent, F.dirs[k2], HV[seq[i + 1]].clone().sub(HV[seq[i]])); D.set(bone, d); parent = d; });
+    }
+    return full;
+  }
+
+  // opts : { arms: {l, r}, legs: {l, r}, head, ground, fingers: {l, r} } — membres à suivre et pieds au sol.
+  // hands : { l, r } points de la main pour cette image (prepare), ou absent.
+  function solve(pts, opts, hands) {
     toRest();
     for (let i = 0; i < 33; i++) pt(pts, i);
     const up = mid(V[11], V[12]).sub(mid(V[23], V[24]));
@@ -270,8 +443,10 @@ export function makeSolver(r, rig) {
       const g = rig[s], rd = rest[s];
       if (opts.arms[s] && rd.upperArm && rd.lowerArm) {
         const a = swing(dChest, rd.upperArm, seg(11 + o, 13 + o)), b = swing(a, rd.lowerArm, seg(13 + o, 15 + o));
+        const poseDir = mid(V[17 + o], V[19 + o]).sub(V[15 + o]);
+        const full = opts.fingers?.[s] && hands?.[s] && solveHand(s, hands[s], poseDir, b, D);
         D.set(g.upperArm, a); D.set(g.lowerArm, b);
-        if (rd.hand) D.set(g.hand, swing(b, rd.hand, mid(V[17 + o], V[19 + o]).sub(V[15 + o])));
+        if (full) D.set(g.hand, full); else if (rd.hand) D.set(g.hand, swing(b, rd.hand, poseDir));
       }
       if (opts.legs[s] && rd.upperLeg && rd.lowerLeg) {
         const a = swing(dHips, rd.upperLeg, seg(23 + o, 25 + o)), b = swing(a, rd.lowerLeg, seg(25 + o, 27 + o));
@@ -281,7 +456,7 @@ export function makeSolver(r, rig) {
     }
     // Du bassin vers les extrémités : orientation voulue dans le modèle → rotation locale de l'os.
     const pq = new THREE.Quaternion(), out = new Map();
-    for (const b of keyed) {
+    for (const b of order) {
       const d = D.get(b); if (!d) continue;
       const q = d.clone().multiply(rq.get(b)).premultiply(quatOf(b.parent, pq).invert());
       if (![q.x, q.y, q.z, q.w].every(Number.isFinite)) continue;
@@ -301,9 +476,11 @@ export function makeSolver(r, rig) {
 }
 
 // Membres à suivre d'après la vidéo : un membre presque jamais visible (hors champ) garde sa pose.
-export function limbsFrom(seen, rig) {
+export function limbsFrom(seen, rig, handSeen = {}) {
   const avg = (...i) => i.reduce((a, j) => a + seen[j], 0) / i.length;
+  const hasF = s => Object.keys(rig.fingers?.[s] || {}).length > 0;
   return {
+    fingers: { l: hasF('l') && handSeen.l > 0.2, r: hasF('r') && handSeen.r > 0.2 },
     arms: { l: avg(13, 15) > 0.3, r: avg(14, 16) > 0.3 },
     legs: { l: rig.legs && avg(25, 27) > 0.4, r: rig.legs && avg(26, 28) > 0.4 },
     head: avg(0, 7, 8) > 0.4,

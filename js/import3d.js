@@ -79,14 +79,14 @@ function makeManager(model, entries) {
 async function loadOne(model, entries) {
   const { m, urlOf } = makeManager(model, entries), url = urlOf(model), x = ext(model.name);
   const load = (loader, u = url) => new Promise((res, rej) => loader.load(u, res, undefined, e => rej(e instanceof Error ? e : new Error(e?.message || 'lecture impossible'))));
-  let obj, clips = [], mmd = false;
+  let obj, clips = [], mmd = false, springs = null;
   if (x === 'glb' || x === 'gltf' || x === 'vrm') {
     const [{ GLTFLoader }, { DRACOLoader }, { MeshoptDecoder }] = await Promise.all([import('three/addons/loaders/GLTFLoader.js'), import('three/addons/loaders/DRACOLoader.js'), import('three/addons/libs/meshopt_decoder.module.js')]);
     const l = new GLTFLoader(m).setResourcePath(BASE);
     l.setDRACOLoader(new DRACOLoader().setDecoderPath(new URL('../vendor/three/addons/libs/draco/', import.meta.url).href));
     l.setMeshoptDecoder(MeshoptDecoder);
     const g = await load(l); obj = g.scene; clips = g.animations || [];
-    tagHumanoid(g);
+    tagHumanoid(g); springs = readSprings(g);
   } else if (x === 'fbx') {
     const [{ FBXLoader }, { TGALoader }] = await Promise.all([import('three/addons/loaders/FBXLoader.js'), import('three/addons/loaders/TGALoader.js')]);
     m.addHandler(/\.tga$/i, new TGALoader(m));
@@ -133,7 +133,7 @@ async function loadOne(model, entries) {
     }
   });
   for (const b of bones) b.userData.rest = { p: b.position.clone(), q: b.quaternion.clone(), s: b.scale.clone() };
-  return { root, bones, clips, mmd, mesh: mmd ? obj : null, format: x, name: model.name.split('/').pop().replace(/\.[^.]+$/, '') };
+  return { root, bones, clips, mmd, springs, mesh: mmd ? obj : null, format: x, name: model.name.split('/').pop().replace(/\.[^.]+$/, '') };
 }
 
 // VRM (0.x et 1.0) : le fichier déclare lui-même ses os humains (hips, leftUpperArm…). Sert à la capture de mouvement.
@@ -142,6 +142,33 @@ function tagHumanoid(g) {
   if (!hb) return;
   const byNode = new Map(Array.isArray(hb) ? hb.map(b => [b.node, b.bone]) : Object.entries(hb).map(([k, v]) => [v.node, k]));
   g.scene.traverse(o => { const n = g.parser.associations.get(o)?.nodes; if (byNode.has(n)) o.userData.humanBone = byNode.get(n); });
+}
+
+// VRM : réglages de la physique des cheveux et vêtements (os à ressort) et de leurs collisions, lus dans le fichier.
+function readSprings(g) {
+  const ex = g.parser?.json?.extensions || {}, nodeOf = new Map();
+  g.scene.traverse(o => { const n = g.parser.associations.get(o)?.nodes; if (n != null && !nodeOf.has(n)) nodeOf.set(n, o); });
+  const N = i => nodeOf.get(i) || null;
+  if (ex.VRMC_springBone) {
+    const s = ex.VRMC_springBone, groups = (s.colliderGroups || []).map(c => c.colliders || []);
+    const colliders = (s.colliders || []).map(c => { const sh = c.shape?.sphere || c.shape?.capsule || {}; return { node: N(c.node), offset: sh.offset || [0, 0, 0], radius: sh.radius || 0, tail: c.shape?.capsule?.tail || null }; });
+    const chains = (s.springs || []).map(sp => ({
+      joints: (sp.joints || []).map(j => ({ node: N(j.node), stiffness: j.stiffness ?? 1, gravity: j.gravityPower ?? 0, gravityDir: j.gravityDir || [0, -1, 0], drag: j.dragForce ?? 0.5, radius: j.hitRadius ?? 0 })),
+      colliders: [...new Set((sp.colliderGroups || []).flatMap(i => groups[i] || []))],
+    }));
+    return { kind: 'vrm1', colliders, chains };
+  }
+  const sa = ex.VRM?.secondaryAnimation;
+  if (sa) { // VRM 0 : axe Z inversé par rapport à glTF
+    const colliders = [], groups = [];
+    for (const cg of sa.colliderGroups || []) groups.push((cg.colliders || []).map(c => colliders.push({ node: N(cg.node), offset: [c.offset?.x || 0, c.offset?.y || 0, -(c.offset?.z || 0)], radius: c.radius || 0, tail: null }) - 1));
+    const chains = (sa.boneGroups || []).flatMap(bg => (bg.bones || []).map(root => ({
+      root: N(root), colliders: (bg.colliderGroups || []).flatMap(i => groups[i] || []),
+      params: { stiffness: bg.stiffiness ?? bg.stiffness ?? 1, gravity: bg.gravityPower ?? 0, gravityDir: [bg.gravityDir?.x ?? 0, bg.gravityDir?.y ?? -1, -(bg.gravityDir?.z ?? 0)], drag: bg.dragForce ?? 0.4, radius: bg.hitRadius ?? 0.02 },
+    })));
+    return { kind: 'vrm0', colliders, chains };
+  }
+  return null;
 }
 
 // Mouvement MMD (.vmd) appliqué à un modèle pmx / pmd.

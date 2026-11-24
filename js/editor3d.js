@@ -9,6 +9,7 @@ import { Project, uid } from './project.js';
 import { expandFiles, loadModel, loadVMD, candidates } from './import3d.js';
 import * as io from './io.js';
 import * as mocap from './mocap.js';
+import * as physics from './physics.js';
 
 const toBlob = (c, type, q) => new Promise(r => c.toBlob(r, type, q));
 const item = (ic, label, onclick, cls = '') => h('button', { class: 'item ' + cls, onclick, html: icon(ic) + `<span>${label}</span>` });
@@ -16,6 +17,7 @@ const PRIMS = { box: 'Cube', sphere: 'Sphère', cylinder: 'Cylindre', cone: 'Cô
 // Personnages livrés avec l'app (dossier models/) : squelette complet, prêts pour la pose et la capture de mouvement.
 const BUILTIN = [['mannequin', 'Mannequin'], ['mannequin-femme', 'Mannequin femme']];
 const boneName = (b, i) => b.userData.label || b.name || 'Os ' + i;
+const FINGER_SIDES = ['l', 'r'];
 
 export function new3dMeta(o) {
   return {
@@ -177,7 +179,7 @@ export async function openEditor3d(P, root, nav) {
   function sample(tr, f, t) {
     let a = tr[0], b = tr[tr.length - 1];
     if (f <= a.f) b = a; else if (f >= b.f) a = b;
-    else for (let i = 0; i < tr.length - 1; i++) if (f >= tr[i].f && f <= tr[i + 1].f) { a = tr[i]; b = tr[i + 1]; break; }
+    else { let lo = 0, hi = tr.length - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (tr[m].f <= f) lo = m; else hi = m; } a = tr[lo]; b = tr[hi]; }
     const k = a === b ? 0 : ease((f - a.f) / (b.f - a.f));
     t.position.copy(va.fromArray(a.p)).lerp(vb.fromArray(b.p), k);
     t.quaternion.copy(qa.fromArray(a.q)).slerp(qb.fromArray(b.q), k);
@@ -397,6 +399,7 @@ export async function openEditor3d(P, root, nav) {
           item('edit', 'Renommer', async () => { const n = await promptDlg('Nom', o.name); if (n) { o.name = n; touch(); draw(); optbar(); } }),
           o.mmd ? item('video', 'Mouvement .vmd', () => { s.close(); pickFiles(f => importVMD(f[0])); }) : null,
           r?.bones.length ? item('person', 'Copier un mouvement filmé', () => { s.close(); select(o.id, sel.obj === o.id ? sel.bone : null); mocapSheet(); }) : null,
+          r?.bones.length ? item('wand', 'Cheveux et vêtements', () => { s.close(); physicsFor(o); }) : null,
           item('undo', 'Effacer ses clés', async () => { if (await confirmDlg(`Effacer toute l’animation de « ${o.name} » ?`, 'Effacer', true)) { pushUndo(); for (const k of Object.keys(P.tracks)) if (k === o.id || k.startsWith(o.id + '#')) delete P.tracks[k]; touch(); evaluate(); drawTicks(); } }),
           item('trash', 'Supprimer', async () => { if (await confirmDlg(`Supprimer « ${o.name} » ?`, 'Supprimer', true)) { pushUndo(); P.objects.splice(P.objects.indexOf(o), 1); scene.remove(r.root); select(null, null); touch(); draw(); } }, 'danger'))));
       return row;
@@ -523,8 +526,10 @@ export async function openEditor3d(P, root, nav) {
     v.src = URL.createObjectURL(file);
     try { await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; setTimeout(rej, 15000); }); }
     catch { toast('Vidéo illisible sur cet appareil'); URL.revokeObjectURL(v.src); return; }
-    const dur = await mocap.videoDuration(v), f0 = frame;
-    const opt = { start: 0, len: Math.min(dur, 30), smooth: 'mid', ground: true, mirror: false };
+    const dur = await mocap.videoDuration(v), f0 = frame, r = rt.get(o.id), rig = mocap.findRig(r.bones);
+    const hasFingers = FINGER_SIDES.some(sd => Object.keys(rig.fingers[sd]).length), springs = physics.findSprings(r, rig);
+    evaluate();
+    const opt = { start: 0, len: Math.min(dur, 30), smooth: 'mid', ground: true, mirror: false, fingers: hasFingers, stab: true, physics: !!springs };
     let started = false;
     const info = h('p', { class: 'hint' });
     const upd = () => {
@@ -538,6 +543,9 @@ export async function openEditor3d(P, root, nav) {
         slider({ label: 'Début', min: 0, max: Math.max(0.1, dur), step: 0.1, value: 0, fmt: x => x.toFixed(1) + ' s', oninput: x => { opt.start = Math.min(x, Math.max(0, dur - 0.1)); if (opt.len > dur - opt.start) { opt.len = Math.max(0.1, dur - opt.start); lenS.set(opt.len); } v.currentTime = opt.start; upd(); } }),
         lenS,
         h('div', { class: 'row' }, h('span', { class: 'lbl' }, 'Lissage'), segmented([['low', 'Léger'], ['mid', 'Moyen'], ['high', 'Fort']], opt.smooth, x => { opt.smooth = x; })),
+        hasFingers ? toggle('Doigts (mains visibles)', opt.fingers, x => { opt.fingers = x; }) : null,
+        toggle('Stabiliser (caméra tenue à la main)', opt.stab, x => { opt.stab = x; }),
+        springs ? toggle(`Cheveux et vêtements qui bougent (${springs.joints.length} os)`, opt.physics, x => { opt.physics = x; }) : null,
         toggle('Pieds posés au sol', opt.ground, x => { opt.ground = x; }),
         toggle('Effet miroir (gauche ↔ droite)', opt.mirror, x => { opt.mirror = x; }),
         info,
@@ -558,7 +566,7 @@ export async function openEditor3d(P, root, nav) {
     const x = cv.getContext('2d');
     try {
       frames = await mocap.track(v, {
-        start: opt.start, len: opt.len, fps: P.fps, cancelled: () => cancel,
+        start: opt.start, len: opt.len, fps: P.fps, hands: opt.fingers, cancelled: () => cancel,
         onFrame: async (i, n, f) => {
           x.drawImage(v, 0, 0, cv.width, cv.height); mocap.drawSkeleton(x, f, cv.width, cv.height);
           txt.textContent = `Analyse du mouvement : image ${i + 1} / ${n}`;
@@ -570,14 +578,15 @@ export async function openEditor3d(P, root, nav) {
     finally { el.remove(); URL.revokeObjectURL(v.src); }
     if (!frames) return;
     if (!frames.some(Boolean)) { toast('Personne n’a été vu dans la vidéo. Filmez tout le corps, bien éclairé.', 5000); return; }
-    const { pts, seen } = mocap.prepare(frames, { mirror: opt.mirror, sigma: { low: 0.03, mid: 0.06, high: 0.12 }[opt.smooth] * P.fps });
-    const limbs = mocap.limbsFrom(seen, rig);
+    const { pts, seen, hands, handSeen } = mocap.prepare(frames, { mirror: opt.mirror, sigma: { low: 0.03, mid: 0.06, high: 0.12 }[opt.smooth] * P.fps, stab: opt.stab ? 0.12 * P.fps : 0 });
+    const limbs = mocap.limbsFrom(seen, rig, handSeen);
+    if (!opt.fingers) limbs.fingers = { l: false, r: false };
     if (!limbs.body) { toast('Le corps n’est pas assez visible dans la vidéo pour copier le mouvement.', 5000); return; }
     const b = busy('Transfert du mouvement…'), keys = new Map(), n = pts.length;
     try {
       const solver = mocap.makeSolver(r, rig);
       for (let i = 0; i < n; i++) {
-        for (const kf of solver.solve(pts[i], { ...limbs, ground: opt.ground })) {
+        for (const kf of solver.solve(pts[i], { ...limbs, ground: opt.ground }, { l: hands.l?.[i], r: hands.r?.[i] })) {
           const bi = r.bones.indexOf(kf.bone); if (bi < 0) continue;
           let a = keys.get(bi); if (!a) keys.set(bi, a = []);
           a.push({ f: f0 + i, p: kf.p, q: kf.q, s: kf.s });
@@ -592,10 +601,43 @@ export async function openEditor3d(P, root, nav) {
       P.tracks[key] = [...old, ...a].sort((p, q) => p.f - q.f);
     }
     if (f0 + n > P.len) { P.len = Math.min(3000, f0 + n); syncLen(); }
+    let phys = 0;
+    if (opt.physics) { const pb = busy('Cheveux et vêtements…'); try { phys = await bakePhysics(o, pb); } catch (e) { console.error(e); toast('Physique impossible : ' + (e.message || e), 5000); } finally { pb.close(); } }
     touch(); select(o.id, null); evaluate(); drawTicks(); updateTop();
-    const off = [rig.legs && !limbs.legs.l && !limbs.legs.r && 'jambes', !limbs.head && 'tête'].filter(Boolean);
-    toast(`Mouvement copié sur « ${o.name} » : ${n} frames, ${keys.size} os.` + (off.length ? ` Hors champ, non suivis : ${off.join(', ')}.` : ''), 5000);
+    const off = [rig.legs && !limbs.legs.l && !limbs.legs.r && 'jambes', !limbs.head && 'tête', opt.fingers && !limbs.fingers.l && !limbs.fingers.r && 'doigts'].filter(Boolean);
+    const fing = limbs.fingers.l || limbs.fingers.r ? ' Doigts suivis.' : '';
+    toast(`Mouvement copié sur « ${o.name} » : ${n} frames, ${keys.size} os.${fing}` + (phys ? ` Cheveux et vêtements : ${phys} os.` : '') + (off.length ? ` Non suivis (hors champ ou trop petits) : ${off.join(', ')}.` : ''), 6000);
     setFrame(f0); play();
+  }
+
+  // Cheveux et vêtements : simulés du premier au dernier frame de la scène, puis enregistrés en clés.
+  async function bakePhysics(o, b) {
+    const r = rt.get(o.id), spec = physics.findSprings(r, mocap.findRig(r.bones));
+    if (!spec) { evaluate(); return 0; }
+    const index = new Map(r.bones.map((bn, i) => [bn, i]));
+    for (const j of spec.joints) { const i = index.get(j.bone); if (i != null) delete P.tracks[o.id + '#' + i]; }
+    const res = await physics.bake(r, spec, {
+      len: P.len, fps: P.fps, evaluate: f => evaluate(f, false),
+      onProgress: async k => { b?.update(`Cheveux et vêtements… ${Math.round(k * 100)} %`, k); await nextPaint(); },
+    });
+    let n = 0;
+    for (const [bone, keys] of res) {
+      const i = index.get(bone); if (i == null) continue;
+      const p = bone.userData.rest.p.toArray(), sc = bone.userData.rest.s.toArray();
+      P.tracks[o.id + '#' + i] = keys.map(k => ({ f: k.f, p, q: k.q, s: sc })); n++;
+    }
+    o.physics = true; evaluate(); drawTicks();
+    return n;
+  }
+  async function physicsFor(o) {
+    stop();
+    const r = rt.get(o.id), spec = physics.findSprings(r, mocap.findRig(r.bones)); evaluate();
+    if (!spec) { toast(`Aucun cheveu ni vêtement mobile reconnu sur « ${o.name} »`, 4000); return; }
+    pushUndo();
+    const b = busy('Cheveux et vêtements…');
+    try { const n = await bakePhysics(o, b); touch(); toast(`Cheveux et vêtements animés sur ${P.len} frames (${n} os). Relancez après avoir changé l’animation.`, 5000); }
+    catch (e) { console.error(e); toast('Physique impossible : ' + (e.message || e), 5000); }
+    finally { b.close(); }
   }
 
   // ---------- Vers la 2D ----------

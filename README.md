@@ -19,7 +19,10 @@ Gestes : un doigt dessine ; deux doigts déplacent, zooment et tournent la page 
 
 - **Personnages prêts à l'emploi** : un mannequin et un mannequin femme, livrés avec l'app (« Ajouter » → un toucher). Articulés de la tête aux doigts (52 os aux noms en français), ils marchent hors ligne.
 - **Import de modèles** : glb, gltf, vrm, fbx, pmx / pmd (MMD), obj (+mtl), dae, stl, ply, seuls, avec leurs textures, ou dans un zip (le format le plus riche du zip est choisi ; s'il est illisible, le suivant est essayé). Mouvements MMD `.vmd`.
-- **Filmer (capture de mouvement)** : on se filme (ou on choisit une vidéo) et le personnage reproduit le mouvement, une clé par frame, à partir du frame courant. Les points du corps sont détectés sur l'appareil par MediaPipe Pose ; les os humains sont reconnus automatiquement (VRM, Mixamo, MMD, VRoid, Blender, Unreal, 3ds Max) ; options : début et durée, lissage, pieds posés au sol, effet miroir. Un membre hors champ garde sa pose. La première utilisation télécharge le détecteur (24 Mo), gardé ensuite sur l'appareil.
+- **Filmer (capture de mouvement)** : on se filme (ou on choisit une vidéo) et le personnage reproduit le mouvement, une clé par frame, à partir du frame courant. Les points du corps sont détectés sur l'appareil par MediaPipe Pose ; les os humains sont reconnus automatiquement (VRM, Mixamo, MMD, VRoid, Blender, Unreal, 3ds Max) ; options : début et durée, lissage, pieds posés au sol, effet miroir. Un membre hors champ garde sa pose. La première utilisation télécharge les détecteurs (32 Mo), gardés ensuite sur l'appareil.
+  - **Doigts** : MediaPipe Hands sur un recadrage agrandi autour de chaque poignet ; chaque phalange suit la vidéo, la main prend aussi sa rotation (paume vers le haut ou le bas), dont une part passe dans l'avant-bras.
+  - **Caméra tenue à la main** : seule l'orientation d'ensemble du corps dépend de la caméra ; elle est lissée dans le temps, les gestes des membres restent intacts.
+  - **Cheveux et vêtements** : os à ressort (inertie, gravité, retour à la forme, collisions avec le corps), réglages lus dans le fichier (VRM 0/1, corps rigides MMD) ou devinés d'après le nom des os (hair, skirt, 髪, スカート…). Calculés après la capture, ou à la demande (Objets → « Cheveux et vêtements ») pour toute animation, puis enregistrés en clés.
 - **Pose et animation** : sélection d'un objet ou d'un os en le touchant, poignées déplacer / tourner / taille, une clé est posée automatiquement sur le frame courant, interpolation entre les clés, animations contenues dans le fichier.
 - **Caméra** : la vue dans le cadre est la caméra ; clés de caméra interpolées.
 - **Scène** : formes simples, fond, lumière, rendu « argile ».
@@ -49,11 +52,14 @@ Sur téléphone : publier le dépôt avec GitHub Pages (le workflow `.github/wor
 | `js/io.js` | import et export |
 | `js/editor.js`, `js/panels.js`, `js/ui.js` | interface |
 | `js/editor3d.js`, `js/import3d.js` | éditeur 3D, import des modèles |
-| `js/mocap.js` | capture de mouvement : détection, reconnaissance du squelette, transfert sur les os |
+| `js/mocap.js` | capture de mouvement : détection du corps et des mains, stabilisation, reconnaissance du squelette, transfert sur les os |
+| `js/physics.js` | cheveux et vêtements : os à ressort et collisions, calculés puis enregistrés en clés |
 | `models/` | mannequins livrés avec l'app (GLB + vignettes) |
 | `tools/usd2glb.py` | convertit un mannequin USDZ (squelette type Mixamo) en GLB pour `models/` |
-| `vendor/` | mp4-muxer, gifenc, three.js (licence MIT), MediaPipe Tasks Vision + modèle Pose « full » (licence Apache 2.0) |
+| `vendor/` | mp4-muxer, gifenc, three.js (licence MIT), MediaPipe Tasks Vision + modèles Pose « full » et Hands (licence Apache 2.0) |
 
 ### Précision de la capture de mouvement
 
 Mesurée sur une vidéo de danse dont on connaît le vrai mouvement : le transfert sur le squelette est exact (0° d'écart sur 7 personnages de types différents) ; l'écart restant vient de la détection d'une seule caméra, précise dans le plan de l'image (≈5°) mais approximative en profondeur. Écart médian : tibias 8–11°, cuisses 14–15°, avant-bras ≈26°, bras 34–44°. Les mouvements faits de face ou de profil passent donc mieux que ceux dirigés vers la caméra.
+
+Doigts (vidéo en pied, 720 × 1280, mains d'environ 50 px) : écart moyen de pliure 10° (pouce) à 27° (index), contre 46 à 81° si les doigts restaient immobiles. Caméra secouée (±2°) : le tremblement du personnage retombe de 1,25 à 0,49 °/image², autant qu'avec une caméra fixe (0,51).
